@@ -298,6 +298,12 @@ def promotion_from_dict(data: dict) -> Promotion:
     return Promotion(**clean)
 
 
+def promotion_fingerprint(promo: Promotion | None) -> str:
+    if promo is None: return ""
+    parts=(promo.source,promo.kind,promo.code.strip().upper(),round(float(promo.discount_amount or 0),2),round(float(promo.discount_percent or 0),4),round(float(promo.minimum_spend or 0),2),round(float(promo.max_discount or 0),2),bool(promo.selected_users_only),bool(promo.app_only),bool(promo.requires_coins))
+    return "|".join(str(v) for v in parts)
+
+
 def load_catalog(path: str | Path) -> dict:
     p = Path(path)
     if not p.is_absolute():
@@ -347,25 +353,20 @@ def save_cache(cache: dict) -> None:
         tmp.unlink(missing_ok=True)
 
 
-def get_cached_promotions(cache: dict, key: str, max_age_hours: int) -> list[Promotion] | None:
+def get_cached_promotions(cache: dict, key: str, max_age_hours: int, promotion_max_age_hours: int | None = None) -> list[Promotion] | None:
     entry = cache.get(key)
-    if not isinstance(entry, dict):
-        return None
+    if not isinstance(entry, dict): return None
     checked_at = _parse_datetime(str(entry.get("checked_at", "")))
-    if checked_at is None:
-        return None
-    if datetime.now(UTC) - checked_at > timedelta(hours=max(1, max_age_hours)):
-        return None
+    if checked_at is None: return None
     raw_promos = entry.get("promotions", [])
-    if not isinstance(raw_promos, list):
-        return []
-    promos = []
+    if not isinstance(raw_promos, list): raw_promos=[]
+    ttl = promotion_max_age_hours if raw_promos and promotion_max_age_hours is not None else max_age_hours
+    if datetime.now(UTC) - checked_at > timedelta(hours=max(1, ttl)): return None
+    promos=[]
     for raw in raw_promos:
         if isinstance(raw, dict):
-            try:
-                promos.append(promotion_from_dict(raw))
-            except (TypeError, ValueError):
-                continue
+            try: promos.append(promotion_from_dict(raw))
+            except (TypeError, ValueError): continue
     return promos
 
 

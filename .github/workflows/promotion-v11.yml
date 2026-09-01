@@ -34,4 +34,5 @@ jobs:
           git add bot.py deal_store.py ml_playwright.py promotion_engine.py
           if git diff --cached --quiet; then exit 0; fi
           git commit -m 'fix: apply Promotion Engine V1.1'
+          git pull --rebase origin fix/promotion-engine-v1-1
           git push origin HEAD:fix/promotion-engine-v1-1

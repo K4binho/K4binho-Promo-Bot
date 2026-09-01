@@ -8,6 +8,8 @@ from dataclasses import dataclass
 import httpx
 
 API_URL = "https://api-sg.aliexpress.com/sync"
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+RETRY_DELAYS = (1.5, 3.0, 6.0)
 
 
 @dataclass
@@ -33,8 +35,7 @@ def _sign(app_secret: str, params: dict[str, str]) -> str:
     ).hexdigest().upper()
 
 
-def _call(app_key: str, app_secret: str, method: str,
-          api_params: dict[str, str]) -> dict:
+def _build_params(app_key: str, app_secret: str, method: str, api_params: dict[str, str]) -> dict[str, str]:
     system_params = {
         "method": method,
         "app_key": app_key,
@@ -43,16 +44,47 @@ def _call(app_key: str, app_secret: str, method: str,
     }
     all_params = {**system_params, **api_params}
     all_params["sign"] = _sign(app_secret, all_params)
+    return all_params
 
-    resp = httpx.get(API_URL, params=all_params, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
 
-    if "error_response" in data:
-        err = data["error_response"]
-        raise RuntimeError(f"AliExpress API error: {err.get('msg', err)}")
+def _is_frequency_limit(data: dict) -> bool:
+    err = data.get("error_response") or {}
+    msg = str(err.get("msg", "")).lower()
+    return "frequency exceeds" in msg or "frequency" in msg and "limit" in msg
 
-    return data
+
+def _call(app_key: str, app_secret: str, method: str,
+          api_params: dict[str, str]) -> dict:
+    last_error: Exception | None = None
+    for attempt in range(len(RETRY_DELAYS) + 1):
+        try:
+            all_params = _build_params(app_key, app_secret, method, api_params)
+            resp = httpx.get(API_URL, params=all_params, timeout=30)
+
+            if resp.status_code in RETRYABLE_STATUS:
+                raise httpx.HTTPStatusError(
+                    f"transient HTTP {resp.status_code}", request=resp.request, response=resp
+                )
+            resp.raise_for_status()
+            data = resp.json()
+
+            if "error_response" not in data:
+                return data
+
+            err = data["error_response"]
+            if _is_frequency_limit(data):
+                last_error = RuntimeError(f"AliExpress API rate limit: {err.get('msg', err)}")
+            else:
+                raise RuntimeError(f"AliExpress API error: {err.get('msg', err)}")
+        except httpx.HTTPError as exc:
+            last_error = exc
+
+        if attempt < len(RETRY_DELAYS):
+            time.sleep(RETRY_DELAYS[attempt])
+
+    if last_error is not None:
+        raise RuntimeError(f"AliExpress API indisponivel apos retries: {last_error}") from last_error
+    raise RuntimeError("AliExpress API indisponivel apos retries")
 
 
 def _parse_percent(raw: str) -> float:
@@ -91,8 +123,7 @@ def fetch_deals(
     if max_sale_price:
         params["max_sale_price"] = str(max_sale_price)
 
-    data = _call(app_key, app_secret,
-                 "aliexpress.affiliate.product.query", params)
+    data = _call(app_key, app_secret, "aliexpress.affiliate.product.query", params)
 
     resp_result = data.get("aliexpress_affiliate_product_query_response", {})
     result = resp_result.get("resp_result", {}).get("result", {})

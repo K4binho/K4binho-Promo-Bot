@@ -4,6 +4,7 @@ Runs Telegram Bot API long polling independently from the promotion cycle so
 commands are handled immediately even while the main worker is sleeping.
 """
 
+import json
 import logging
 import threading
 import time
@@ -24,18 +25,24 @@ class TelegramRealtimeListener:
         *,
         timeout_seconds: int = 25,
         retry_seconds: float = 2.0,
+        initial_offset: int = 0,
     ) -> None:
         self.token = token
         self.handler = handler
         self.timeout_seconds = max(1, timeout_seconds)
         self.retry_seconds = max(0.5, retry_seconds)
-        self._offset = 0
+        self._offset = max(0, int(initial_offset))
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
+    @property
+    def is_running(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
+
     def start(self) -> None:
-        if self._thread and self._thread.is_alive():
+        if self.is_running:
             return
+        self._stop.clear()
         self._thread = threading.Thread(
             target=self._run,
             name="telegram-realtime-listener",
@@ -44,8 +51,11 @@ class TelegramRealtimeListener:
         self._thread.start()
         log.info("[Telegram] listener realtime iniciado.")
 
-    def stop(self) -> None:
+    def stop(self, *, join_timeout: float = 1.0) -> None:
         self._stop.set()
+        thread = self._thread
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=max(0.0, join_timeout))
 
     def _run(self) -> None:
         with httpx.Client(timeout=self.timeout_seconds + 10) as client:
@@ -56,11 +66,18 @@ class TelegramRealtimeListener:
                         params={
                             "offset": self._offset,
                             "timeout": self.timeout_seconds,
-                            "allowed_updates": ["message"],
+                            # Telegram Bot API expects a JSON-serialized list.
+                            "allowed_updates": json.dumps(["message"]),
                         },
                     )
                     response.raise_for_status()
-                    updates = response.json().get("result", [])
+                    payload = response.json()
+                    if not payload.get("ok", True):
+                        log.warning("[Telegram] getUpdates retornou ok=false: %s", payload)
+                        time.sleep(self.retry_seconds)
+                        continue
+
+                    updates = payload.get("result", [])
                     for update in updates:
                         update_id = int(update.get("update_id", 0))
                         self._offset = max(self._offset, update_id + 1)

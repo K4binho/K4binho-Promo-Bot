@@ -1,149 +1,114 @@
 # Roadmap — K4binho Promo Bot
 
-Atualizado em **2026-08-31**.
+Atualizado em **2026-09-01**.
 
 ## Status atual
 
-O projeto está na fase de **curadoria comercial + inteligência promocional**. A arquitetura básica de fontes, scoring, histórico, PLUS, alertas, analytics e tracking já existe.
+O projeto está na fase de **curadoria comercial + inteligência promocional**.
 
-### Entregue
+### ✅ Consolidado
 
-- Mercado Livre com scraping de ofertas, highlights, trending e best seller.
-- Fallback comercial ML para reduzir silêncio sem liberar oferta fraca.
-- Geração de link afiliado `meli.la` via Chrome persistente.
+- Mercado Livre com scraper, highlights, trending e best seller.
+- Links afiliados ML via sessão persistente do Chrome.
 - AliExpress via API afiliada.
-- Steam com busca paginada, reviews oficiais Steam, lookup UUID ITAD, waitlist, historical low e descoberta de bundles/packages.
-- Nuuvem via ITAD.
-- GMG via impact.com, aguardando condição operacional/afiliada.
-- PLUS editorial com fallback após janela sem publicação.
-- Histórico de preço ML.
-- Price-drop e cooldown anti-spam.
-- Digest diário persistente, sem duplicar após reinício.
-- Alertas personalizados no Telegram.
-- Analytics multidimensional.
-- Click tracking/redirect opcional.
-- Export sanitizado do projeto.
-- **Promotion Engine V1**.
-- 104 testes passando.
+- Steam com reviews oficiais, ITAD, waitlist, historical low e bundles/packages.
+- Nuuvem e GMG como conteúdo PLUS/editorial.
+- Histórico de preço, scoring multidimensional e diversidade por categoria.
+- Alertas, digest diário, analytics e click tracking opcional.
+- Promotion Engine com preço listado, preço garantido e preço potencial.
+- Export sanitizado e proteção de segredos em logs.
+- CI com suíte completa de testes.
 
-## Promotion Engine V1 — entregue
+## Promotion Engine V1.1
 
-### Mercado Livre
+### ✅ Implementado e coberto por testes
 
-- descoberta de cupom em texto renderizado da página via Playwright;
-- scan limitado por ciclo;
-- cache com TTL;
-- cupom entra no preço efetivo;
-- cupom confirmado aumenta evidência de preço e conversion score;
-- condição por usuário/app/moedas não é tratada como preço garantido;
-- Telegram exibe código, economia e condições.
+- fallback comercial ML não depende mais de histórico incompleto;
+- fallback usa sinais independentes e guardrails mínimos de qualidade, conversão e confiança;
+- rating alto isolado não é suficiente para classificar um produto como forte;
+- scanner de cupons abre controles promocionais de forma defensiva;
+- scanner bloqueia ações de compra, carrinho, checkout e pagamento;
+- produtos já vistos voltam a ser escaneados quando o cache expira;
+- cache positivo de promoção pode expirar antes do cache vazio;
+- promoção nova pode reativar item já publicado quando produz queda real de preço efetivo;
+- revival possui cooldown e limite mínimo de ganho;
+- histórico continua registrando o preço público listado, não o preço temporário de cupom;
+- diagnóstico ML agora separa elegíveis, cache, scans, promoções encontradas e revivals.
 
-### AliExpress
+### 🧪 Aguardando validação ao vivo
 
-- catálogo `promotions.json` para campanhas/códigos conhecidos;
-- melhor cupom aplicável é escolhido automaticamente por preço mínimo/desconto;
-- preço efetivo participa do ranking;
-- suporte a aviso pré-campanha único.
+O código e a suíte automatizada estão verdes, mas a descoberta real depende da interface e da sessão atual do Mercado Livre. Precisamos observar ciclos reais e confirmar:
 
-### Shopee
-
-- modelo de promoção e template já suportam página de resgate e desconto condicional;
-- integração de descoberta/postagem segue pendente.
+- taxa de acerto do scanner interativo;
+- códigos como `VANTAGEMJA`/`OPORTUNIDADE` quando realmente visíveis;
+- impacto do aumento de 8 para 16 scans prioritários por ciclo;
+- quantidade e qualidade das ofertas liberadas pelo fallback;
+- quantidade de revivals por promoção sem gerar spam.
 
 ## Próximas prioridades
 
-### P0 — observar dados reais do Promotion Engine
+### P0 — validar ML V1.1 em produção local
 
-Antes de aumentar agressividade:
+Observar no log:
 
-1. acompanhar `Promocao`, `Codigos`, `Scaneados`, `Fallback comercial` e `Selecionados` no log do ML;
-2. validar se o parser encontra cupons reais como `VANTAGEMJA` quando visíveis para a conta;
-3. verificar quantos cupons detectados realmente aplicam no checkout;
-4. ajustar `ML_COUPON_SCAN_ITEMS` apenas se o custo/tempo do Chrome estiver aceitável.
+```text
+[ML][promo-scan]
+[ML][promo-revival]
+[ML][fallback-comercial]
+[ML][cupom...]
+```
+
+E o resumo:
+
+```text
+Promo scan elegiveis
+Promo cache
+Scaneados
+Promo encontradas
+Vistos reescaneados
+Fallback comercial
+Reativados por promocao
+Selecionados
+```
 
 ### P1 — AliExpress Campaign Discovery
 
-Hoje o motor aplica automaticamente cupons cadastrados, mas a descoberta de códigos de evento ainda precisa de uma fonte confiável. Próximo passo:
+O motor já aceita catálogo de cupons e escolhe a melhor regra aplicável. Falta uma fonte confiável/operacional para atualizar campanhas automaticamente.
 
-- endpoint/feed oficial se disponível;
-- importação manual rápida de tabela de cupons;
-- validade automática por início/fim;
-- combinação segura com moedas sem prometer preço universal.
+### P1 — click tracking público
 
-### P1 — Shopee comercial
+O redirect existe, mas `localhost` não serve usuários do Telegram. Publicar endpoint HTTPS antes de usar cliques como sinal de otimização.
 
-Quando AppID/Secret estiverem disponíveis:
+### P1 — Shopee
 
-- source de produtos;
-- links afiliados;
-- cupom/voucher landing page;
-- loja oficial, vendas e rating;
-- preço potencial vs garantido;
-- ciclo próprio + analytics.
-
-### P1 — Tracking real em produção
-
-O click server existe, mas `CLICK_BASE_URL=http://localhost:8321` não é clicável pelos usuários do Telegram. Publicar o redirect em domínio/host HTTPS e medir:
-
-```text
-source → post → click → compra/conversão
-```
-
-Sem impressões do Telegram, usar inicialmente cliques por publicação e cliques por fonte/categoria.
+Estrutura promocional preparada, mas integração comercial real continua pendente de fonte/API/credenciais adequadas.
 
 ### P2 — SQLite
 
-Migrar gradualmente:
+Migrar gradualmente estados JSON depois de estabilizar a lógica comercial.
 
-- `seen.json`;
-- `price_history.json`;
-- `deal_store.json`;
-- `alerts.json`;
-- `promotion_cache.json`;
-- `promotion_state.json`;
-- `analytics.jsonl`.
+### P2 — health check real
 
-### P2 — Health Check real
-
-Expandir `/status` para mostrar:
-
-- último ciclo por fonte;
-- duração do ciclo;
-- produtos encontrados/aprovados;
-- erros 24h;
-- último cupom detectado;
-- sessão ML;
-- status do redirect de cliques.
+Evoluir `/status` para incluir último ciclo por fonte, erros recentes, sessão ML, último cupom e saúde do redirect.
 
 ## Regras de produto
 
 - ML/Ali são fontes comerciais e merecem prioridade de conversão.
-- Steam/Nuuvem/GMG continuam como PLUS e não devem ser removidos por não monetizarem.
-- Cupom só deve alterar o score quando o desconto for suficientemente confiável.
-- Promoção para usuários selecionados deve ser mostrada como possibilidade, nunca como preço garantido.
-- Não aumentar volume apenas para preencher canal.
-- Primeiro medir comportamento real; só depois automatizar pesos de scoring.
+- Steam/Nuuvem/GMG continuam como PLUS/editorial.
+- Cupom só altera score garantido quando a condição é confiável.
+- Benefício condicionado a app, moedas ou usuários selecionados não deve ser anunciado como universal.
+- Produto visto pode voltar apenas diante de nova oportunidade relevante, respeitando cooldown.
+- Não aumentar volume só para preencher canal.
+- Não automatizar pesos de scoring sem dados reais de comportamento/conversão.
 
-## Limites conhecidos
+## Estado dos testes
 
-| Limite | Situação |
-|---|---|
-| ML depende de Chrome visível | Necessário por sessão/anti-bot. |
-| Parser de cupom ML depende do texto renderizado | Mudanças de UI podem exigir ajuste. |
-| Ali não descobre todos os códigos de campanha sozinho | `promotions.json` cobre V1. |
-| Shopee ainda não está no loop | Cliente de auth apenas. |
-| Click tracking local não funciona para público remoto | Precisa endpoint público. |
-| JSON é suficiente para MVP, não para escala alta | SQLite é próximo passo. |
+```text
+114 passed
+```
+
+A validação automatizada cobre a suíte anterior e os guardrails novos da V1.1.
 
 ## Segurança
 
-`bot.log` antigo podia registrar URLs completas do `httpx` contendo token/chave. O `bot.py` agora reduz `httpx/httpcore` para WARNING. Mesmo assim:
-
-- rotacione credenciais que já foram expostas em logs compartilhados;
-- não envie `.env`;
-- não envie `ml_token.json`;
-- não envie `ml_profile/`;
-- não use ZIP manual da pasta;
-- use `export_project.py`.
-
-O exporter agora também ignora **qualquer `.zip` interno**, evitando carregar snapshots antigos com segredos dentro de um novo export.
+Nunca versionar ou compartilhar `.env`, `ml_token.json`, `ml_profile/`, logs com credenciais ou estados operacionais. O `.gitignore` e o exporter sanitizado devem continuar sendo usados.

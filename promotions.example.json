@@ -1,0 +1,80 @@
+{
+  "mercadolivre": [
+    {
+      "enabled": false,
+      "kind": "coupon",
+      "code": "VANTAGEMJA",
+      "discount_percent": 10,
+      "max_discount": 200,
+      "minimum_spend": 1000,
+      "match_keywords": ["rtx", "monitor", "notebook"],
+      "description": "Exemplo de cupom ML quando confirmado manualmente",
+      "confidence": "manual"
+    },
+    {
+      "enabled": false,
+      "kind": "automatic",
+      "discount_amount": 100,
+      "minimum_spend": 0,
+      "selected_users_only": true,
+      "description": "R$ 100 OFF na finalização para usuários selecionados",
+      "confidence": "manual"
+    }
+  ],
+  "aliexpress": [
+    {
+      "enabled": false,
+      "kind": "coupon",
+      "code": "BRFS1",
+      "discount_amount": 12,
+      "minimum_spend": 90,
+      "description": "Exemplo de faixa de cupom de campanha",
+      "confidence": "manual"
+    },
+    {
+      "enabled": false,
+      "kind": "coupon",
+      "code": "BRFS5",
+      "discount_amount": 140,
+      "minimum_spend": 1200,
+      "description": "Exemplo de faixa de cupom de campanha",
+      "confidence": "manual"
+    }
+  ],
+  "shopee": [
+    {
+      "enabled": false,
+      "kind": "coupon_rescue",
+      "description": "Resgate os cupons antes da compra",
+      "rescue_url": "https://s.shopee.com.br/SEU_LINK_DE_CUPONS",
+      "confidence": "manual"
+    },
+    {
+      "enabled": false,
+      "kind": "automatic",
+      "discount_amount": 100,
+      "selected_users_only": true,
+      "description": "Desconto exibido na finalização para contas elegíveis",
+      "confidence": "manual"
+    }
+  ],
+  "campaigns": [
+    {
+      "id": "aliexpress-evento-exemplo",
+      "enabled": false,
+      "source": "aliexpress",
+      "title": "Evento promocional do AliExpress",
+      "starts_at": "2026-09-01T00:00:00-03:00",
+      "starts_label": "Começa à meia-noite",
+      "notice_hours_before": 4,
+      "description": "Aviso único antes do início da campanha.",
+      "landing_url": "",
+      "coins_url": "",
+      "coupons": [
+        {"code": "BRFS1", "discount_amount": 12, "minimum_spend": 90},
+        {"code": "BRFS2", "discount_amount": 25, "minimum_spend": 180},
+        {"code": "BRFS3", "discount_amount": 40, "minimum_spend": 320}
+      ]
+    }
+  ]
+}

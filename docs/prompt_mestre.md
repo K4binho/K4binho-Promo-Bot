@@ -1,191 +1,109 @@
 # Prompt Mestre — K4binho Promo Bot
 
-Contexto atualizado em **2026-08-31** para continuar o projeto com outra IA.
+Atualizado em **2026-09-01**.
 
-## Objetivo
+Use este documento para retomar o projeto sem depender do histórico de uma conversa.
 
-Transformar o bot em uma plataforma inteligente de curadoria de ofertas, equilibrando:
+## Regra principal
 
-```text
-valor para o usuário
-→ confiança
-→ retenção
-→ cliques
-→ compras
-→ receita de afiliados
-```
+O código atual, os testes, os arquivos em `docs/` e o log real são a fonte de verdade. Antes de alterar comportamento, leia a implementação existente e preserve o que já funciona.
 
-Não remover a camada PLUS apenas por não monetizar.
+## Objetivo do produto
 
-## Fontes
+O K4binho Promo Bot é um motor de curadoria de ofertas para Telegram.
 
-- **Mercado Livre** — comercial principal, afiliado.
-- **AliExpress** — comercial, afiliado.
-- **Steam** — PLUS/editorial.
-- **Nuuvem** — PLUS/editorial.
-- **GMG** — PLUS, código impact.com pronto.
-- **Shopee** — cliente de API pronto, ainda sem ciclo no bot.
+Objetivos:
 
-## Arquitetura real
+1. encontrar oportunidades realmente boas;
+2. manter confiança e retenção no canal;
+3. priorizar fontes comerciais sem virar spam;
+4. aumentar cliques/compras com dados reais;
+5. aprender com analytics somente quando houver amostra suficiente.
+
+## Prioridade das fontes
+
+- Mercado Livre: comercial e prioridade alta.
+- AliExpress: comercial.
+- Steam/Nuuvem/GMG: PLUS/editorial.
+- Shopee: integração real ainda pendente; não fingir suporte completo.
+
+Não remova PLUS só porque não monetiza diretamente.
+
+## Arquitetura
 
 ```text
 Sources
-  ↓
-Normalization
-  ↓
-Promotion Engine
-  ↓
-Effective Price / Conditions
-  ↓
-Price History
-  ↓
-Quality / Conversion / Retention / Confidence
-  ↓
-Ranking + Diversity
-  ↓
-Telegram
-  ↓
-Click Tracking + Analytics + Alerts
+→ Normalização
+→ Price History
+→ Promotion Engine
+→ Scoring multidimensional
+→ Ranking/diversidade
+→ Scheduler
+→ Telegram
+→ Tracking
+→ Analytics
 ```
 
-## Promotion Engine V1
+## Estado atual — Promotion Engine V1.1
 
-Arquivo: `promotion_engine.py`.
+### ✅ Implementado
 
-Responsabilidades:
+- preço listado separado de preço efetivo garantido/potencial;
+- desconto condicional não entra no score como garantido;
+- fallback ML não depende de histórico incompleto;
+- fallback exige preço + sinais independentes + guardrails de qualidade/conversão/confiança;
+- rating alto sozinho não classifica produto como forte;
+- scanner ML expande elementos seguros relacionados a cupom/benefício/desconto;
+- scanner não deve clicar em compra, carrinho, checkout ou pagamento;
+- seen não impede reescaneamento após expiração do cache;
+- cache positivo de promoção pode ter TTL menor;
+- produto visto pode voltar por nova promoção + queda relevante + cooldown;
+- histórico de preço armazena preço listado, não cupom temporário;
+- logs do funil ML possuem diagnóstico de scan/cache/fallback/revival;
+- CI e suíte completa: 114 testes passando.
 
-- normalizar cupom/desconto/campanha;
-- compra mínima/teto;
-- condição por usuário/app/moedas;
-- preço garantido vs preço potencial;
-- catálogo `promotions.json`;
-- cache `promotion_cache.json`;
-- estado de campanhas `promotion_state.json`;
-- parser conservador de texto renderizado do ML.
+### 🧪 Precisa validação real
 
-### Regra crítica
+- taxa de descoberta de cupons na UI atual do Mercado Livre;
+- códigos e valores reais exibidos para a conta logada;
+- qualidade dos produtos liberados pelo fallback;
+- comportamento do revival em ciclos reais;
+- custo de abrir 16 anúncios prioritários por ciclo.
 
-**Preço condicional nunca entra como preço garantido no score.**
+## Regras para futuras mudanças
 
-Ex.: “R$100 OFF apenas para usuários selecionados” pode ser exibido como possibilidade, mas o ranking usa o preço normal.
+- Não baixar filtros globalmente só para publicar mais.
+- Não usar histórico como bloqueio absoluto de oportunidade comercial.
+- Não republicar item visto apenas porque o texto da página mudou.
+- Não contaminar histórico base com preço temporário de cupom.
+- Não anunciar condição personalizada como preço universal.
+- Não adicionar lojas antes de estabilizar medição de cliques/conversões.
+- Mudança nova precisa de teste de regressão.
+- Atualize `README.md`, `ROADMAP.md`, `OPERACAO.md` e `ProximosPasso.md` quando o estado real mudar.
 
-### ML
+## Diagnóstico esperado
 
-`bot.py` escolhe até `ML_COUPON_SCAN_ITEMS` anúncios fortes sem cache e chama `ml_playwright.discover_promotions()`.
-
-O resultado fica em cache por `ML_COUPON_CACHE_HOURS`.
-
-Cupom confirmado:
-
-- reduz `effective_price`;
-- aumenta evidência de preço;
-- aumenta quality/conversion;
-- aparece no Telegram;
-- vai para analytics.
-
-O histórico continua registrando preço listado.
-
-### AliExpress
-
-Cupons de evento entram via `promotions.json`. O motor testa automaticamente compra mínima e escolhe a melhor regra aplicável.
-
-### Shopee
-
-Promotion Engine e template suportam `coupon_rescue` e selected users, mas o source ainda não está integrado ao loop.
-
-## Mercado Livre — estratégia comercial
-
-ML tem prioridade monetária e não deve ficar silencioso por excesso de conservadorismo.
-
-Existe fallback comercial:
-
-- preço precisa passar no gate;
-- item não pode estar em seen;
-- score mínimo do fallback = `max(60, SCORE_MIN - 10)`;
-- precisa de sinal forte: bestseller/trending/loja oficial/vendas/rating/cupom garantido;
-- pensado para itens ainda sem histórico completo.
-
-Diagnóstico de funil inclui:
+Observe principalmente:
 
 ```text
-Encontrados
-Preco OK
-Historico pronto
-Launch score
-Sinal comercial forte
-Ja vistos
-Promocao
-Codigos
-Scaneados
-Aprovados estritos
-Fallback comercial
-Candidatos
-Selecionados
+[ML][promo-scan]
+[ML][promo-revival]
+[ML][fallback-comercial]
+[ML][cupom...]
 ```
 
-## Steam
-
-Estado atual:
-
-- busca ~500 ofertas;
-- app/package/bundle;
-- descoberta limitada de bundles a partir de páginas de apps;
-- Steam Reviews para review score/count;
-- ITAD `/games/lookup/v1` para UUID;
-- ITAD waitlist + history low;
-- bundles/packages podem passar por score editorial mesmo sem reviews próprias.
-
-Não voltar a usar `games/info/v2?id=app/{steamid}` — isso causava 400.
-
-## Analytics
-
-`analytics.record_deal()` registra também:
-
-- `listed_price`;
-- `promotion_code`;
-- `promotion_savings`;
-- `promotion_conditional`.
-
-O campo `price` passa a representar o preço efetivo garantido quando houver cupom aplicável.
+Resumo do ML deve permitir enxergar encontrados → preço OK → sinais → promo scan/cache → strict/fallback/revival → candidatos → selecionados.
 
 ## Segurança
 
-- Não imprimir segredos.
-- `.env`, token ML, perfil Chrome, logs e runtime JSON ficam fora do export.
-- `httpx/httpcore` ficam em WARNING no `bot.py`.
-- `export_project.py` ignora qualquer ZIP interno.
-- Use somente export sanitizado para compartilhar o projeto.
+Nunca exponha `.env`, token Telegram, chaves de API, `ml_token.json`, `ml_profile/` ou logs com credenciais. `httpx/httpcore` não devem imprimir URLs sensíveis em INFO. Use export sanitizado.
 
-## Testes
+## Próximas prioridades
 
-Estado desta versão:
-
-```text
-104 passed
-```
-
-Comando:
-
-```bash
-python -m pytest -q
-```
-
-## Próximos passos recomendados
-
-1. Validar Promotion Engine em ciclos reais do ML.
-2. Medir quantos cupons descobertos realmente aplicam no checkout.
-3. Criar fonte confiável de descoberta de cupons/eventos AliExpress.
-4. Publicar click redirect em URL HTTPS pública.
-5. Integrar Shopee quando credenciais/API estiverem disponíveis.
-6. Migrar persistência para SQLite antes de ML/analytics crescerem demais.
-
-## Regras para futuras alterações
-
-- não quebrar ML, Steam, Nuuvem, GMG ou Ali existentes;
-- não remover PLUS;
-- rodar testes antes/depois;
-- preferir mudanças incrementais;
-- atualizar documentação junto com código;
-- não inventar preço de cupom;
-- não tratar promoção personalizada como universal;
-- medir antes de automatizar aprendizado de pesos.
+1. validar ML V1.1 ao vivo;
+2. melhorar descoberta global de campanhas quando houver dados;
+3. publicar click tracking em HTTPS;
+4. medir cliques por fonte/categoria/promoção;
+5. só então ajustar scoring com comportamento real;
+6. SQLite depois da estabilização comercial;
+7. Shopee quando houver integração verdadeira.

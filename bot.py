@@ -134,70 +134,53 @@ def _ml_scan_priority(deal, best_sellers: set[str], trends: list[str]) -> float:
     return score
 
 
-def _ml_promotions_for_deals(
-    cfg: Config,
-    deals: list,
-    best_sellers: set[str],
-    trends: list[str],
-    seen,
-    dry_run: bool,
-) -> tuple[dict[str, list[promotion_engine.Promotion]], int]:
-    catalog = promotion_engine.load_catalog(cfg.promotions_file)
-    cache = promotion_engine.load_cache()
-    promo_map: dict[str, list[promotion_engine.Promotion]] = {}
-    needs_scan = []
+def _ml_signal_points(deal, *, is_best_seller: bool, is_trending: bool, guaranteed_promotion: bool) -> int:
+    points=0; sales=int(getattr(deal,"sales_count",0) or 0); rating=float(getattr(deal,"rating",0) or 0)
+    if is_best_seller: points += 2
+    if is_trending: points += 1
+    if bool(getattr(deal,"official_store",False)): points += 1
+    if sales >= 5000: points += 2
+    elif sales >= 500: points += 1
+    if rating >= 4.7 and sales >= 100: points += 1
+    if guaranteed_promotion: points += 2
+    return points
 
+
+def _ml_commercial_fallback_eligible(result, *, has_price_evidence: bool, signal_points: int, already_seen: bool, guaranteed_promotion: bool, score_min: int) -> bool:
+    if already_seen or not has_price_evidence or signal_points < 2: return False
+    if result.quality < 35 or result.conversion < 25 or result.confidence < 25: return False
+    return guaranteed_promotion or result.total >= max(45, score_min - 25)
+
+
+def _ml_promotions_for_deals(cfg: Config, deals: list, best_sellers: set[str], trends: list[str], seen, dry_run: bool) -> tuple[dict[str, list[promotion_engine.Promotion]], dict[str, int]]:
+    catalog=promotion_engine.load_catalog(cfg.promotions_file); cache=promotion_engine.load_cache(); promo_map={}; needs=[]
+    stats={"eligible":0,"cache_hits":0,"scanned":0,"found":0,"codes":0,"seen_scanned":0}
     for deal in deals:
-        manual = promotion_engine.promotions_for_item(
-            catalog, "mercadolivre", deal.title, deal.price
-        )
-        listing = []
-        listing_promo = promotion_engine.promotion_from_coupon_amount(
-            "mercadolivre", getattr(deal, "coupon_amount", None)
-        )
-        if listing_promo:
-            listing.append(listing_promo)
-
-        cached = promotion_engine.get_cached_promotions(
-            cache, f"ml:{deal.item_id}", cfg.ml_coupon_cache_hours
-        )
-        promo_map[deal.item_id] = _merge_promotions(manual, listing, cached or [])
-        if (
-            cached is None
-            and deal.item_id not in seen
-            and deal.permalink
-        ):
-            needs_scan.append(deal)
-
-    scanned = 0
-    if cfg.ml_coupon_discovery_enabled and not dry_run and needs_scan:
-        needs_scan.sort(
-            key=lambda d: _ml_scan_priority(d, best_sellers, trends), reverse=True
-        )
-        targets = needs_scan[: max(0, cfg.ml_coupon_scan_items)]
-        urls = [d.permalink for d in targets]
-        if urls:
-            try:
-                discovered = ml_playwright.discover_promotions(urls)
-            except ml_playwright.NotLoggedIn as exc:
-                log.warning("[ML][cupom] descoberta via pagina indisponivel: %s", exc)
-                discovered = {}
-            except Exception as exc:
-                log.warning("[ML][cupom] falha na descoberta: %s", exc)
-                discovered = {}
-
-            for deal in targets:
-                found = discovered.get(deal.permalink, [])
-                # Mesmo resultado vazio entra no cache para evitar abrir o mesmo
-                # anúncio a cada ciclo durante o TTL.
-                promotion_engine.set_cached_promotions(cache, f"ml:{deal.item_id}", found)
-                promo_map[deal.item_id] = _merge_promotions(
-                    promo_map.get(deal.item_id, []), found
-                )
-                scanned += 1
-            promotion_engine.save_cache(cache)
-
-    return promo_map, scanned
+        manual=promotion_engine.promotions_for_item(catalog,"mercadolivre",deal.title,deal.price); listing=[]
+        lp=promotion_engine.promotion_from_coupon_amount("mercadolivre",getattr(deal,"coupon_amount",None))
+        if lp: listing.append(lp)
+        cached=promotion_engine.get_cached_promotions(cache,f"ml:{deal.item_id}",cfg.ml_coupon_cache_hours,promotion_max_age_hours=cfg.ml_coupon_positive_cache_hours)
+        if cached is not None: stats["cache_hits"] += 1
+        promo_map[deal.item_id]=_merge_promotions(manual,listing,cached or [])
+        if cached is None and deal.permalink: needs.append(deal)
+    stats["eligible"]=len(needs)
+    if cfg.ml_coupon_discovery_enabled and not dry_run and needs:
+        needs.sort(key=lambda d:_ml_scan_priority(d,best_sellers,trends)+(10 if d.item_id in seen else 0),reverse=True)
+        targets=needs[:max(0,cfg.ml_coupon_scan_items)]; urls=[d.permalink for d in targets]
+        try: discovered=ml_playwright.discover_promotions(urls) if urls else {}
+        except ml_playwright.NotLoggedIn as exc: log.warning("[ML][cupom] descoberta via pagina indisponivel: %s",exc); discovered={}
+        except Exception as exc: log.warning("[ML][cupom] falha na descoberta: %s",exc); discovered={}
+        for deal in targets:
+            found=discovered.get(deal.permalink,[]); promotion_engine.set_cached_promotions(cache,f"ml:{deal.item_id}",found)
+            promo_map[deal.item_id]=_merge_promotions(promo_map.get(deal.item_id,[]),found); stats["scanned"] += 1
+            if deal.item_id in seen: stats["seen_scanned"] += 1
+            if found:
+                stats["found"] += 1; stats["codes"] += sum(1 for p in found if p.code)
+                ev=promotion_engine.evaluate_price(deal.price,found,title=deal.title); d=ev.display_promotion; code=d.code if d and d.code else "sem-codigo"
+                log.info("[ML][promo-scan] %s | %s | economia=R$ %.2f",deal.title[:55],code,ev.guaranteed_savings)
+            else: log.info("[ML][promo-scan] %s | sem promocao",deal.title[:55])
+        promotion_engine.save_cache(cache)
+    return promo_map,stats
 
 
 def run_cycle(
@@ -241,7 +224,7 @@ def run_cycle(
         cfg.ml_highlight_category_ids, cfg.ml_client_id, cfg.ml_client_secret
     )
     trends = ml_signals.trending_keywords(cfg.ml_client_id, cfg.ml_client_secret)
-    promotion_map, promotion_scanned = _ml_promotions_for_deals(
+    promotion_map, promotion_scan_stats = _ml_promotions_for_deals(
         cfg, deals, best_sellers, trends, seen, dry_run
     )
     candidates = []
@@ -257,9 +240,10 @@ def run_cycle(
         "commercial_fallback": 0,
         "with_promotion": 0,
         "coupon_codes": 0,
+        "promotion_revival": 0,
     }
     commercial_fallback_ids: set[str] = set()
-    commercial_floor = max(60, cfg.score_min - 10)
+    promotion_revival_ids: set[str] = set()
 
     for deal in deals:
         observations = price_history.observation_count(
@@ -305,17 +289,8 @@ def run_cycle(
 
         is_best_seller = deal.item_id in best_sellers
         is_trending = ml_signals.title_matches_trend(deal.title, trends)
-        sales_count = int(getattr(deal, "sales_count", 0) or 0)
-        rating = float(getattr(deal, "rating", 0) or 0)
-        official_store = bool(getattr(deal, "official_store", False))
-        strong_commercial_signal = (
-            is_best_seller
-            or is_trending
-            or official_store
-            or sales_count >= 500
-            or rating >= 4.7
-            or promo_eval.guaranteed_savings > 0
-        )
+        signal_points = _ml_signal_points(deal, is_best_seller=is_best_seller, is_trending=is_trending, guaranteed_promotion=promo_eval.guaranteed_savings > 0)
+        strong_commercial_signal = signal_points >= 2
 
         if has_price_evidence:
             ml_stats["price_ok"] += 1
@@ -336,14 +311,7 @@ def run_cycle(
         if strict_approved:
             ml_stats["strict_approved"] += 1
 
-        commercial_fallback = (
-            not strict_approved
-            and has_price_evidence
-            and deal.item_id not in seen
-            and not history_ready
-            and result.total >= commercial_floor
-            and strong_commercial_signal
-        )
+        commercial_fallback = (not strict_approved and _ml_commercial_fallback_eligible(result, has_price_evidence=has_price_evidence, signal_points=signal_points, already_seen=deal.item_id in seen, guaranteed_promotion=promo_eval.guaranteed_savings > 0, score_min=cfg.score_min))
         if commercial_fallback:
             commercial_fallback_ids.add(deal.item_id)
             ml_stats["commercial_fallback"] += 1
@@ -371,18 +339,17 @@ def run_cycle(
 
         if not approved and deal.item_id in seen:
             current_effective = promo_eval.scoring_price
-            is_drop, prev_price = ds.check_price_drop(
-                published_deals, deal.item_id, current_effective
-            )
-            if is_drop:
-                log.info(
-                    "[ML][price-drop] %s caiu de %.2f para %.2f",
-                    deal.title[:40], prev_price, current_effective,
-                )
-                candidates.append((
-                    result.total + 20, deal, result, historical_min,
-                    historical_avg, prev_price, promo_eval,
-                ))
+            sig = promotion_engine.promotion_fingerprint(promo_eval.best_guaranteed)
+            is_revival, prev_price = ds.check_promotion_revival(published_deals, deal.item_id, current_effective, sig, min_drop_percent=cfg.ml_promo_revival_min_drop_percent, min_drop_amount=cfg.ml_promo_revival_min_drop_amount, cooldown_hours=cfg.ml_promo_revival_cooldown_hours)
+            if is_revival:
+                promotion_revival_ids.add(deal.item_id); ml_stats["promotion_revival"] += 1
+                log.info("[ML][promo-revival] %s | %.2f -> %.2f", deal.title[:45], prev_price, current_effective)
+                candidates.append((result.total + 25, deal, result, historical_min, historical_avg, prev_price, promo_eval))
+            else:
+                is_drop, prev_price = ds.check_price_drop(published_deals, deal.item_id, current_effective)
+                if is_drop:
+                    log.info("[ML][price-drop] %s caiu de %.2f para %.2f", deal.title[:40], prev_price, current_effective)
+                    candidates.append((result.total + 20, deal, result, historical_min, historical_avg, prev_price, promo_eval))
 
     candidates.sort(key=lambda pair: pair[0], reverse=True)
     selected = _diversify_by_category(candidates, cfg.max_posts_per_cycle)
@@ -390,20 +357,13 @@ def run_cycle(
     log.info(
         "[ML] Encontrados: %d | Preco OK: %d | Historico pronto: %d | "
         "Launch score: %d | Sinal comercial forte: %d | Ja vistos: %d | "
-        "Promocao: %d | Codigos: %d | Scaneados: %d | "
-        "Aprovados estritos: %d | Fallback comercial: %d | "
-        "Candidatos: %d | Selecionados: %d",
-        ml_stats["found"], ml_stats["price_ok"], ml_stats["history_ready"],
-        ml_stats["launch_ok"], ml_stats["strong_signal"], ml_stats["already_seen"],
-        ml_stats["with_promotion"], ml_stats["coupon_codes"], promotion_scanned,
-        ml_stats["strict_approved"], ml_stats["commercial_fallback"],
-        len(candidates), len(selected),
+        "Promocao: %d | Codigos: %d | Promo scan elegiveis: %d | Promo cache: %d | Scaneados: %d | Promo encontradas: %d | Vistos reescaneados: %d | Aprovados estritos: %d | Fallback comercial: %d | Reativados por promocao: %d | Candidatos: %d | Selecionados: %d",
+        ml_stats["found"], ml_stats["price_ok"], ml_stats["history_ready"], ml_stats["launch_ok"], ml_stats["strong_signal"], ml_stats["already_seen"], ml_stats["with_promotion"], ml_stats["coupon_codes"], promotion_scan_stats["eligible"], promotion_scan_stats["cache_hits"], promotion_scan_stats["scanned"], promotion_scan_stats["found"], promotion_scan_stats["seen_scanned"], ml_stats["strict_approved"], ml_stats["commercial_fallback"], ml_stats["promotion_revival"], len(candidates), len(selected),
     )
 
     if commercial_fallback_ids:
         log.info(
-            "[ML] Fallback comercial ativo: score minimo %d + sinal forte + preco OK + sem historico completo.",
-            commercial_floor,
+            "[ML] Fallback comercial ativo: preco OK + sinais independentes + guardrails de qualidade/conversao/confianca.",
         )
 
     if dry_run:
@@ -457,7 +417,7 @@ def run_cycle(
                 link=link,
                 promotion=promo_eval,
             )
-            action = "price_drop"
+            action = "promotion_revival" if deal.item_id in promotion_revival_ids else "price_drop"
         else:
             text = telegram.format_deal(
                 title=deal.title,
@@ -489,7 +449,7 @@ def run_cycle(
             continue
 
         mark_seen(seen, deal.item_id)
-        ds.record_published(published_deals, deal.item_id, effective_price)
+        ds.record_published(published_deals, deal.item_id, effective_price, promotion_signature=promotion_engine.promotion_fingerprint(promo_eval.best_guaranteed))
         posted += 1
         display_promo = promo_eval.display_promotion
         analytics.record_deal(

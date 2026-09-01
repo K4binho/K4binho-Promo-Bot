@@ -72,10 +72,22 @@ class Config:
         default_factory=lambda: _get_bool("ML_COUPON_DISCOVERY_ENABLED", True)
     )
     ml_coupon_scan_items: int = field(
-        default_factory=lambda: _get_int("ML_COUPON_SCAN_ITEMS", 8)
+        default_factory=lambda: _get_int("ML_COUPON_SCAN_ITEMS", 16)
     )
     ml_coupon_cache_hours: int = field(
         default_factory=lambda: _get_int("ML_COUPON_CACHE_HOURS", 6)
+    )
+    ml_coupon_positive_cache_hours: int = field(
+        default_factory=lambda: _get_int("ML_COUPON_POSITIVE_CACHE_HOURS", 2)
+    )
+    ml_promo_revival_cooldown_hours: int = field(
+        default_factory=lambda: _get_int("ML_PROMO_REVIVAL_COOLDOWN_HOURS", 6)
+    )
+    ml_promo_revival_min_drop_percent: int = field(
+        default_factory=lambda: _get_int("ML_PROMO_REVIVAL_MIN_DROP_PERCENT", 5)
+    )
+    ml_promo_revival_min_drop_amount: int = field(
+        default_factory=lambda: _get_int("ML_PROMO_REVIVAL_MIN_DROP_AMOUNT", 20)
     )
     promotion_campaign_notices_enabled: bool = field(
         default_factory=lambda: _get_bool("PROMOTION_CAMPAIGN_NOTICES_ENABLED", True)
@@ -95,9 +107,6 @@ class Config:
         default_factory=lambda: _get_int("STEAM_BUNDLE_SCAN_APPS", 24)
     )
     itad_api_key: str = field(default_factory=lambda: _get("ITAD_API_KEY"))
-    # So posta jogo com nota Steam >= isso, avaliacoes suficientes pra nota
-    # ser confiavel, e muita gente de olho (wishlist na ITAD) - ou seja,
-    # jogos realmente bons e "famosos" que muita gente quer.
     steam_min_review_score: int = field(
         default_factory=lambda: _get_int("STEAM_MIN_REVIEW_SCORE", 80)
     )

@@ -53,48 +53,47 @@ def _image_from_page(page) -> str | None:
 
 
 def _promotion_text_from_page(page) -> str:
-    return page.evaluate(
-        """() => {
-            const root = document.querySelector('main') || document.body;
-            return root ? (root.innerText || '') : '';
-        }"""
-    ) or ""
+    return page.evaluate("""() => { const root=document.querySelector('main')||document.body; return root ? (root.innerText||'') : ''; }""") or ""
 
-
-def discover_promotions(
-    product_urls: list[str],
-) -> dict[str, list[promotion_engine.Promotion]]:
-    """Abre uma amostra de anúncios e detecta cupons visíveis no texto renderizado.
-
-    Usa a mesma sessão persistente necessária para gerar os links de afiliado.
-    Falha de um anúncio não interrompe os demais. O chamador decide cache/TTL.
-    """
-    if not product_urls:
-        return {}
-    if not USER_DATA_DIR.exists():
-        raise NotLoggedIn("Sem sessao. Rode: python login_ml.py")
-
-    results: dict[str, list[promotion_engine.Promotion]] = {}
-    with sync_playwright() as p:
-        ctx = _launch(p, headless=False)
-        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+_PROMO_TRIGGER_WORDS=("cupom","cupons","ver cupom","ver cupons","aplicar cupom","usar cupom","beneficio","benefícios","beneficios","desconto","resgatar")
+_BLOCKED_TRIGGER_WORDS=("comprar","finalizar","checkout","carrinho","pagar","adicionar ao carrinho")
+def _is_safe_promo_trigger(text: str) -> bool:
+    norm=" ".join((text or "").lower().split())
+    return bool(norm and len(norm)<=180 and not any(w in norm for w in _BLOCKED_TRIGGER_WORDS) and any(w in norm for w in _PROMO_TRIGGER_WORDS))
+def _expand_promotion_elements(page, max_clicks: int = 4) -> int:
+    candidates=page.locator("button, a, [role='button'], summary")
+    try: count=min(candidates.count(),100)
+    except Exception: return 0
+    clicked=0; seen=set()
+    for idx in range(count):
+        if clicked>=max_clicks: break
+        item=candidates.nth(idx)
+        try: text=(item.inner_text(timeout=350) or "").strip()
+        except Exception: continue
+        norm=" ".join(text.lower().split())
+        if norm in seen or not _is_safe_promo_trigger(text): continue
+        seen.add(norm)
         try:
-            for i, url in enumerate(product_urls):
+            if not item.is_visible(timeout=250): continue
+            item.click(timeout=900); page.wait_for_timeout(450); clicked += 1
+        except Exception: continue
+    return clicked
+def discover_promotions(product_urls: list[str]) -> dict[str, list[promotion_engine.Promotion]]:
+    if not product_urls: return {}
+    if not USER_DATA_DIR.exists(): raise NotLoggedIn("Sem sessao. Rode: python login_ml.py")
+    results={}
+    with sync_playwright() as p:
+        ctx=_launch(p,headless=False); page=ctx.pages[0] if ctx.pages else ctx.new_page()
+        try:
+            for i,url in enumerate(product_urls):
                 try:
-                    page.goto(url, wait_until="domcontentloaded")
-                    page.wait_for_timeout(2_500 if i == 0 else 1_200)
-
-                    if i == 0 and not _cookie(ctx, "ssid"):
-                        raise NotLoggedIn("Sessao expirou. Rode: python login_ml.py")
-
-                    text = _promotion_text_from_page(page)
-                    results[url] = promotion_engine.parse_mercadolivre_text(text)
-                except NotLoggedIn:
-                    raise
-                except Exception:
-                    results[url] = []
-        finally:
-            ctx.close()
+                    page.goto(url,wait_until="domcontentloaded"); page.wait_for_timeout(2300 if i==0 else 1000)
+                    if i==0 and not _cookie(ctx,"ssid"): raise NotLoggedIn("Sessao expirou. Rode: python login_ml.py")
+                    before=_promotion_text_from_page(page); _expand_promotion_elements(page); after=_promotion_text_from_page(page)
+                    results[url]=promotion_engine.parse_mercadolivre_text(before if after==before else f"{before}\n{after}")
+                except NotLoggedIn: raise
+                except Exception: results[url]=[]
+        finally: ctx.close()
     return results
 
 def generate_links(

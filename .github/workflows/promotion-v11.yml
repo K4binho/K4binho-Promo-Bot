@@ -1,0 +1,23 @@
+name: Python tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+      - name: Syntax check
+        run: python -m py_compile bot.py config.py deal_store.py ml_playwright.py promotion_engine.py
+      - name: Tests
+        run: python -m pytest -q

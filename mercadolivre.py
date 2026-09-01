@@ -1,8 +1,13 @@
 from dataclasses import dataclass
+import time
 
 import httpx
 
 from ml_oauth import get_valid_token
+
+
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+RETRY_DELAYS = (2, 5, 10)
 
 
 @dataclass
@@ -36,6 +41,34 @@ HIGHLIGHTS_URL = "https://api.mercadolibre.com/highlights/{site}/category/{cat}"
 ITEMS_URL = "https://api.mercadolibre.com/items"
 
 
+def _get_with_retry(url: str, *, params: dict | None = None, headers: dict | None = None, timeout: int = 30) -> httpx.Response:
+    last_exc: Exception | None = None
+    attempts = len(RETRY_DELAYS) + 1
+    for attempt in range(attempts):
+        try:
+            resp = httpx.get(url, params=params, headers=headers, timeout=timeout)
+            if resp.status_code not in RETRYABLE_STATUS:
+                resp.raise_for_status()
+                return resp
+            last_exc = httpx.HTTPStatusError(
+                f"transient HTTP {resp.status_code}", request=resp.request, response=resp
+            )
+        except httpx.HTTPError as exc:
+            last_exc = exc
+
+        if attempt < len(RETRY_DELAYS):
+            retry_after = 0.0
+            if 'resp' in locals() and getattr(resp, 'headers', None):
+                try:
+                    retry_after = float(resp.headers.get("Retry-After", "0") or 0)
+                except ValueError:
+                    retry_after = 0.0
+            time.sleep(max(RETRY_DELAYS[attempt], retry_after))
+
+    assert last_exc is not None
+    raise last_exc
+
+
 def _deals_from_items_payload(payload: list[dict]) -> list[Deal]:
     deals = []
     for entry in payload:
@@ -47,11 +80,7 @@ def _deals_from_items_payload(payload: list[dict]) -> list[Deal]:
                 item_id=item.get("id", ""),
                 title=item.get("title", ""),
                 price=float(item.get("price") or 0),
-                original_price=(
-                    float(item["original_price"])
-                    if item.get("original_price")
-                    else None
-                ),
+                original_price=(float(item["original_price"]) if item.get("original_price") else None),
                 permalink=item.get("permalink", ""),
                 thumbnail=item.get("thumbnail", ""),
                 sales_count=int(item.get("sold_quantity") or 0),
@@ -62,21 +91,26 @@ def _deals_from_items_payload(payload: list[dict]) -> list[Deal]:
 
 
 def fetch_items(item_ids: list[str], access_token: str) -> list[Deal]:
-    """Busca dados completos de itens pelo endpoint /items?ids=... (em
-    lotes de 20, limite da API do ML). Continua funcionando mesmo com o
-    /sites/{site}/search bloqueado."""
+    """Busca itens em lotes de 20 sem deixar falha transitória derrubar o bot.
+
+    Cada lote usa retry/backoff para 429/5xx. Se um lote continuar falhando,
+    ele é ignorado e os lotes restantes continuam sendo processados.
+    """
     deals: list[Deal] = []
     for i in range(0, len(item_ids), 20):
         chunk = item_ids[i : i + 20]
         if not chunk:
             continue
-        resp = httpx.get(
-            ITEMS_URL,
-            params={"ids": ",".join(chunk)},
-            headers=_build_headers(access_token),
-            timeout=30,
-        )
-        resp.raise_for_status()
+        try:
+            resp = _get_with_retry(
+                ITEMS_URL,
+                params={"ids": ",".join(chunk)},
+                headers=_build_headers(access_token),
+                timeout=30,
+            )
+        except httpx.HTTPError as exc:
+            print(f"[erro] ML /items lote ignorado apos retries: {exc}")
+            continue
         deals.extend(_deals_from_items_payload(resp.json()))
     return deals
 
@@ -87,29 +121,22 @@ def collect_highlight_deals(
     client_id: str,
     client_secret: str,
 ) -> list[Deal]:
-    """Descobre produtos em alta por categoria via /highlights (ainda
-    funcional) e completa os dados de cada um via /items?ids=. Substitui
-    a busca livre por termo, que o ML bloqueou para apps de terceiros."""
+    """Descobre produtos em alta por categoria e completa via /items."""
     token = get_valid_token(client_id, client_secret)
     if not token:
-        raise RuntimeError(
-            "Sem token valido do Mercado Livre. Rode: python ml_setup.py"
-        )
+        raise RuntimeError("Sem token valido do Mercado Livre. Rode: python ml_setup.py")
 
     ids: set[str] = set()
     for cat in categories:
         try:
-            resp = httpx.get(
+            resp = _get_with_retry(
                 HIGHLIGHTS_URL.format(site=site, cat=cat),
                 headers=_build_headers(token),
                 timeout=30,
             )
-            if resp.status_code == 200:
-                ids.update(
-                    x["id"] for x in resp.json().get("content", []) if x.get("id")
-                )
+            ids.update(x["id"] for x in resp.json().get("content", []) if x.get("id"))
         except httpx.HTTPError as exc:
-            print(f"[erro] highlights categoria {cat}: {exc}")
+            print(f"[erro] highlights categoria {cat} ignorada apos retries: {exc}")
             continue
 
     if not ids:

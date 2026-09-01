@@ -1,6 +1,7 @@
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import bot_commands
+import telegram_listener
 
 
 def _update(text="/start", *, thread_id=10, user_id=123):
@@ -42,3 +43,43 @@ def test_poll_commands_starts_single_realtime_listener():
         fake.start.assert_called_once()
     finally:
         bot_commands._realtime_listener = old
+
+
+def test_listener_serializes_allowed_updates_and_advances_offset():
+    handled = []
+    listener = None
+
+    def handler(update):
+        handled.append(update)
+        listener._stop.set()
+
+    listener = telegram_listener.TelegramRealtimeListener("token", handler, initial_offset=3)
+    response = Mock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {"ok": True, "result": [{"update_id": 7, "message": {"text": "/start"}}]}
+    client = Mock()
+    client.get.return_value = response
+    client_context = MagicMock()
+    client_context.__enter__.return_value = client
+
+    with patch.object(telegram_listener.httpx, "Client", return_value=client_context):
+        listener._run()
+
+    assert handled == [{"update_id": 7, "message": {"text": "/start"}}]
+    assert listener._offset == 8
+    params = client.get.call_args.kwargs["params"]
+    assert params["offset"] == 3
+    assert params["allowed_updates"] == '["message"]'
+
+
+def test_listener_can_restart_after_stop():
+    listener = telegram_listener.TelegramRealtimeListener("token", lambda update: None)
+    listener._stop.set()
+
+    with patch.object(listener, "_run") as run:
+        listener.start()
+        if listener._thread:
+            listener._thread.join(timeout=1)
+
+    assert not listener._stop.is_set()
+    run.assert_called_once()

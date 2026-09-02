@@ -1,8 +1,13 @@
+import asyncio
 import logging
 import socket
 import sys
+import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import partial
+from typing import Callable
 
 import httpx
 
@@ -32,6 +37,89 @@ log = logging.getLogger("k4binho")
 
 _lock_socket: socket.socket | None = None
 _ml_session_alert_sent: bool = False
+_click_links_lock = threading.RLock()
+_alerts_lock = threading.RLock()
+_plus_candidates_lock = threading.RLock()
+
+
+class ThreadSafeDict(dict):
+    """Dict com iteracoes por snapshot para uso pelas fontes concorrentes."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._lock = threading.RLock()
+
+    def __contains__(self, key):
+        with self._lock:
+            return super().__contains__(key)
+
+    def __getitem__(self, key):
+        with self._lock:
+            return super().__getitem__(key)
+
+    def __setitem__(self, key, value):
+        with self._lock:
+            return super().__setitem__(key, value)
+
+    def __delitem__(self, key):
+        with self._lock:
+            return super().__delitem__(key)
+
+    def __iter__(self):
+        with self._lock:
+            return iter(list(super().keys()))
+
+    def get(self, key, default=None):
+        with self._lock:
+            return super().get(key, default)
+
+    def items(self):
+        with self._lock:
+            return list(super().items())
+
+    def keys(self):
+        with self._lock:
+            return list(super().keys())
+
+    def values(self):
+        with self._lock:
+            return list(super().values())
+
+
+@dataclass(frozen=True)
+class SourceTask:
+    """Uma fonte independente registrada para execucao concorrente."""
+
+    name: str
+    runner: Callable[[], int]
+
+
+async def _run_source_task(task: SourceTask, semaphore: asyncio.Semaphore) -> int:
+    async with semaphore:
+        log.info("[%s] tarefa iniciada.", task.name)
+        try:
+            posted = await asyncio.to_thread(task.runner)
+        except Exception:
+            log.exception("[%s] tarefa falhou; as demais fontes continuarao.", task.name)
+            return 0
+        result = int(posted or 0)
+        log.info("[%s] tarefa concluida: %d oferta(s).", task.name, result)
+        return result
+
+
+async def run_source_tasks(
+    tasks: list[SourceTask],
+    max_concurrency: int,
+) -> dict[str, int]:
+    """Executa fontes bloqueantes em threads, isolando falhas por fonte."""
+
+    if not tasks:
+        return {}
+    semaphore = asyncio.Semaphore(max(1, max_concurrency))
+    results = await asyncio.gather(
+        *(_run_source_task(task, semaphore) for task in tasks)
+    )
+    return {task.name: result for task, result in zip(tasks, results, strict=True)}
 
 
 def _acquire_single_instance_lock() -> bool:
@@ -83,17 +171,24 @@ _plus_candidates: list[tuple[float, str, str, str, object, object]] = []
 def _wrap_link(cfg: Config, deal_id: str, destination: str, source: str, title: str) -> str:
     if not cfg.click_tracking_enabled:
         return destination
-    click_tracker.register_link(_click_links, deal_id, destination, source=source, title=title)
-    click_tracker.save_links(_click_links)
+    with _click_links_lock:
+        click_tracker.register_link(_click_links, deal_id, destination, source=source, title=title)
+        click_tracker.save_links(_click_links)
     return click_server.tracking_url(cfg.click_base_url, deal_id)
 
 
 def _check_alerts(cfg: Config, alerts: dict, title: str, price: float, source: str, link: str, product_id: str = "") -> None:
-    matches = alert_store.match_deal(alerts, title, price, source, product_id=product_id)
-    for chat_id, alert in matches:
-        bot_commands.notify_alert_match(cfg.telegram_bot_token, chat_id, alert, title, price, link)
-    if matches:
-        alert_store.save_alerts(alerts)
+    with _alerts_lock:
+        matches = alert_store.match_deal(alerts, title, price, source, product_id=product_id)
+        for chat_id, alert in matches:
+            bot_commands.notify_alert_match(cfg.telegram_bot_token, chat_id, alert, title, price, link)
+        if matches:
+            alert_store.save_alerts(alerts)
+
+
+def _add_plus_candidate(candidate: dict) -> None:
+    with _plus_candidates_lock:
+        _plus_candidates.append(candidate)
 
 
 def _promotion_signature(promo: promotion_engine.Promotion) -> tuple:
@@ -547,7 +642,7 @@ def run_steam_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]], 
             waitlisted=g.waitlisted,
         )
         all_scored.append((r.total, g, r))
-        _plus_candidates.append({
+        _add_plus_candidate({
             "score": r.total, "source": "steam", "seen_key": f"steam:{g.game_id}",
             "title": g.title, "price": g.price, "original_price": g.original_price,
             "discount_percent": g.discount_percent, "link": g.permalink,
@@ -665,18 +760,28 @@ def run_steam_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]], 
 
 
 def run_gmg_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]], dry_run: bool) -> int:
-    if not (cfg.cj_account_sid and cfg.cj_auth_token and cfg.gmg_program_id and cfg.gmg_catalog_id):
-        # Integracao GMG/CJ ainda nao configurada (faltam credenciais ou IDs);
-        # nao trata como erro, so pula o ciclo silenciosamente.
+    if not (cfg.cj_account_sid and cfg.cj_auth_token):
+        # Sem credenciais impact.com, pula a integracao silenciosamente.
         return 0
     try:
+        program_id, catalog_id = gmg_cj.resolve_program_and_catalog(
+            cfg.cj_account_sid,
+            cfg.cj_auth_token,
+            cfg.gmg_program_id,
+            cfg.gmg_catalog_id,
+            getattr(cfg, "gmg_catalog_currency", "BRL"),
+        )
         catalog_items = gmg_cj.fetch_catalog_items(
-            cfg.cj_account_sid, cfg.cj_auth_token, cfg.gmg_catalog_id
+            cfg.cj_account_sid,
+            cfg.cj_auth_token,
+            catalog_id,
+            page_size=getattr(cfg, "gmg_catalog_page_size", 1000),
+            max_pages=getattr(cfg, "gmg_catalog_max_pages", 10),
         )
         promo_codes = gmg_cj.fetch_promo_codes(
-            cfg.cj_account_sid, cfg.cj_auth_token, program_id=cfg.gmg_program_id
+            cfg.cj_account_sid, cfg.cj_auth_token, program_id=program_id
         )
-    except httpx.HTTPError as exc:
+    except (RuntimeError, httpx.HTTPError) as exc:
         log.error("[GMG] %s", exc)
         return 0
 
@@ -706,7 +811,7 @@ def run_gmg_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]], dr
             source="gmg",
         )
         all_scored_gmg.append((r.total, g, r))
-        _plus_candidates.append({
+        _add_plus_candidate({
             "score": r.total, "source": "gmg", "seen_key": f"gmg:{g.item_id}",
             "title": g.title, "price": g.price, "original_price": g.original_price,
             "discount_percent": int(g.discount_percent), "link": g.permalink,
@@ -779,7 +884,7 @@ def run_gmg_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]], dr
             history_confidence=_gmg_result.history_confidence,
             category="games",
             deal_type="plus",
-            affiliate=False,
+            affiliate=True,
             action="published",
         )
         log.info("[GMG] postado: %s%% off | %s", game.discount_percent, game.title[:50])
@@ -1006,7 +1111,7 @@ def run_nuuvem_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]],
             waitlisted=d.waitlisted,
         )
         all_scored.append((r.total, d, r))
-        _plus_candidates.append({
+        _add_plus_candidate({
             "score": r.total, "source": "nuuvem", "seen_key": f"nuuvem:{d.game_id}",
             "title": d.title, "price": d.price, "original_price": d.original_price,
             "discount_percent": d.discount_percent, "link": d.permalink,
@@ -1204,7 +1309,7 @@ def run_plus_fallback(cfg: Config, seen: dict[str, str], alerts: dict[str, list[
         confidence_score=result.confidence,
         final_score=result.final,
         history_confidence=result.history_confidence,
-        category="games", deal_type="plus", affiliate=False,
+        category="games", deal_type="plus", affiliate=(source == "gmg"),
         action="published", action_reason="plus_editorial_fallback",
     )
     log.info(
@@ -1369,6 +1474,31 @@ def run_digest(cfg: Config, dry_run: bool, last_digest_date: str) -> str:
     return today
 
 
+def build_source_tasks(
+    cfg: Config,
+    seen: dict[str, str],
+    history: dict[str, list[list[str | int]]],
+    published_deals: dict[str, dict],
+    alerts: dict[str, list[dict]],
+    dry_run: bool,
+) -> list[SourceTask]:
+    """Registro unico das fontes; novas integracoes entram somente nesta lista."""
+
+    return [
+        SourceTask(
+            "Mercado Livre",
+            partial(run_cycle, cfg, seen, history, published_deals, alerts, dry_run),
+        ),
+        SourceTask("Steam", partial(run_steam_cycle, cfg, seen, alerts, dry_run)),
+        SourceTask("GMG", partial(run_gmg_cycle, cfg, seen, alerts, dry_run)),
+        SourceTask(
+            "AliExpress",
+            partial(run_aliexpress_cycle, cfg, seen, alerts, dry_run),
+        ),
+        SourceTask("Nuuvem", partial(run_nuuvem_cycle, cfg, seen, alerts, dry_run)),
+    ]
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -1395,7 +1525,7 @@ def main() -> None:
 
     once = "--once" in sys.argv
     dry_run = "--dry-run" in sys.argv
-    seen = load_seen()
+    seen = ThreadSafeDict(load_seen())
     history = price_history.load_history()
     published_deals = ds.load_deals()
     alerts = alert_store.load_alerts()
@@ -1403,6 +1533,11 @@ def main() -> None:
     _click_links = click_tracker.load_links()
     last_digest_date = ""
     last_update_id = 0
+
+    telegram.configure_rate_limits(
+        chat_interval_seconds=cfg.telegram_chat_interval_seconds,
+        global_messages_per_second=cfg.telegram_global_messages_per_second,
+    )
 
     if cfg.click_tracking_enabled and not dry_run:
         click_server.start(cfg.click_server_port, _click_links)
@@ -1423,24 +1558,24 @@ def main() -> None:
             cfg.telegram_bot_token, alerts, last_update_id,
             admin_chat_id=cfg.telegram_admin_chat_id,
         )
-        _plus_candidates.clear()
+        with _plus_candidates_lock:
+            _plus_candidates.clear()
         posted = run_promotion_campaigns(cfg, dry_run)
-        posted += run_cycle(cfg, seen, history, published_deals, alerts, dry_run)
-        save_seen(seen)
+        source_results = asyncio.run(
+            run_source_tasks(
+                build_source_tasks(
+                    cfg, seen, history, published_deals, alerts, dry_run
+                ),
+                max_concurrency=cfg.source_max_concurrency,
+            )
+        )
+        posted += sum(source_results.values())
         ds.save_deals(published_deals)
-        steam_posted = run_steam_cycle(cfg, seen, alerts, dry_run)
-        posted += steam_posted
-        save_seen(seen)
-        gmg_posted = run_gmg_cycle(cfg, seen, alerts, dry_run)
-        posted += gmg_posted
-        save_seen(seen)
-        posted += run_aliexpress_cycle(cfg, seen, alerts, dry_run)
-        save_seen(seen)
-        nuuvem_posted = run_nuuvem_cycle(cfg, seen, alerts, dry_run)
-        posted += nuuvem_posted
         save_seen(seen)
 
-        plus_posted = steam_posted + gmg_posted + nuuvem_posted
+        plus_posted = sum(
+            source_results.get(name, 0) for name in ("Steam", "GMG", "Nuuvem")
+        )
         if plus_posted == 0:
             posted += run_plus_fallback(cfg, seen, alerts, dry_run)
             save_seen(seen)

@@ -53,9 +53,40 @@ def _image_from_page(page) -> str | None:
 
 
 def _promotion_text_from_page(page) -> str:
-    return page.evaluate("""() => { const root=document.querySelector('main')||document.body; return root ? (root.innerText||'') : ''; }""") or ""
+    return page.evaluate(
+        """() => {
+            const selectors = [
+                '[class*="coupon" i]',
+                '[data-testid*="coupon" i]',
+                '[aria-label*="cupom" i]'
+            ];
+            const texts = [];
+            const seen = new Set();
+            for (const selector of selectors) {
+                for (const element of document.querySelectorAll(selector)) {
+                    const text = (element.innerText || element.textContent ||
+                        element.getAttribute('aria-label') || '').trim();
+                    if (text && !seen.has(text)) {
+                        seen.add(text);
+                        texts.push(text);
+                    }
+                }
+            }
+            if (texts.length) return texts.join('\n');
 
-_PROMO_TRIGGER_WORDS=("cupom","cupons","ver cupom","ver cupons","aplicar cupom","usar cupom","beneficio","benefícios","beneficios","desconto","resgatar")
+            const root = document.querySelector('main') || document.body;
+            const lines = root ? (root.innerText || '').split('\n') : [];
+            const nearby = [];
+            for (let i = 0; i < lines.length; i += 1) {
+                if (/cupom|código|resgatar/i.test(lines[i])) {
+                    nearby.push(...lines.slice(Math.max(0, i - 2), i + 3));
+                }
+            }
+            return [...new Set(nearby.map(x => x.trim()).filter(Boolean))].join('\n');
+        }"""
+    ) or ""
+
+_PROMO_TRIGGER_WORDS=("cupom","cupons","ver cupom","ver cupons","aplicar cupom","usar cupom","ativar cupom","resgatar cupom","resgatar cupons")
 _BLOCKED_TRIGGER_WORDS=("comprar","finalizar","checkout","carrinho","pagar","adicionar ao carrinho")
 def _is_safe_promo_trigger(text: str) -> bool:
     norm=" ".join((text or "").lower().split())

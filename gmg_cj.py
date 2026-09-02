@@ -30,6 +30,7 @@ import httpx
 
 BASE_URL = "https://api.impact.com"
 GMG_NAME_HINT = "Green Man Gaming"
+DEFAULT_CATALOG_CURRENCY = "BRL"
 
 
 @dataclass
@@ -100,18 +101,93 @@ def list_catalogs(account_sid: str, auth_token: str, campaign_id: str | None = N
     return data.get("Catalogs", [])
 
 
+def select_product_catalog(
+    catalogs: list[dict], preferred_currency: str = DEFAULT_CATALOG_CURRENCY
+) -> dict | None:
+    """Escolhe o catalogo de produtos da moeda desejada, evitando bundles."""
+    currency = preferred_currency.strip().upper()
+    product_catalogs = [
+        catalog for catalog in catalogs
+        if "product catalog" in str(catalog.get("Name", "")).lower()
+    ]
+    return next(
+        (
+            catalog for catalog in product_catalogs
+            if currency in str(catalog.get("Name", "")).upper()
+        ),
+        product_catalogs[0] if product_catalogs else None,
+    )
+
+
+def resolve_program_and_catalog(
+    account_sid: str,
+    auth_token: str,
+    program_id: str = "",
+    catalog_id: str = "",
+    preferred_currency: str = DEFAULT_CATALOG_CURRENCY,
+) -> tuple[str, str]:
+    """Descobre IDs da GMG quando eles nao foram preenchidos no ambiente."""
+    if program_id and catalog_id:
+        return program_id, catalog_id
+
+    program = find_gmg_program(account_sid, auth_token)
+    if not program:
+        raise RuntimeError("Programa Green Man Gaming nao encontrado na conta impact.com")
+    resolved_program_id = program_id or str(program.get("CampaignId") or "")
+    if not resolved_program_id:
+        raise RuntimeError("Programa GMG sem CampaignId")
+    if catalog_id:
+        return resolved_program_id, catalog_id
+
+    catalogs = list_catalogs(
+        account_sid, auth_token, campaign_id=resolved_program_id
+    )
+    catalog = select_product_catalog(catalogs, preferred_currency)
+    resolved_catalog_id = str(catalog.get("Id") or "") if catalog else ""
+    if not resolved_catalog_id:
+        raise RuntimeError(
+            f"Catalogo de produtos GMG ({preferred_currency}) nao encontrado"
+        )
+    return resolved_program_id, resolved_catalog_id
+
+
 def fetch_catalog_items(
-    account_sid: str, auth_token: str, catalog_id: str, query: str | None = None
+    account_sid: str,
+    auth_token: str,
+    catalog_id: str,
+    query: str | None = None,
+    *,
+    page_size: int = 1000,
+    max_pages: int = 10,
 ) -> list[dict]:
     """GET /Mediapartners/{AccountSID}/Catalogs/{CatalogId}/Items
-    `query` (opcional) filtra itens, ex.: "CurrentPrice > 50"."""
-    data = _get(
-        f"/Mediapartners/{account_sid}/Catalogs/{catalog_id}/Items",
-        account_sid,
-        auth_token,
-        Query=query,
-    )
-    return data.get("Items", [])
+    `query` (opcional) filtra itens, ex.: "CurrentPrice > 50".
+    A API pagina o catalogo; le ate `max_pages` sem repetir a primeira pagina.
+    """
+    items: list[dict] = []
+    page_size = max(1, min(int(page_size), 1000))
+    max_pages = max(1, int(max_pages))
+
+    for page in range(1, max_pages + 1):
+        data = _get(
+            f"/Mediapartners/{account_sid}/Catalogs/{catalog_id}/Items",
+            account_sid,
+            auth_token,
+            Query=query,
+            Page=page,
+            PageSize=page_size,
+        )
+        batch = data.get("Items", [])
+        if not isinstance(batch, list) or not batch:
+            break
+        items.extend(batch)
+        try:
+            total_pages = int(data.get("@numpages") or page)
+        except (TypeError, ValueError):
+            total_pages = page
+        if page >= total_pages:
+            break
+    return items
 
 
 def fetch_promotions(account_sid: str, auth_token: str) -> list[dict]:

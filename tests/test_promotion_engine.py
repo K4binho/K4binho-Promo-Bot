@@ -69,6 +69,21 @@ class PromotionEngineTest(unittest.TestCase):
         self.assertTrue(promos[0].selected_users_only)
         self.assertEqual(promos[0].discount_amount, 100.0)
 
+    def test_parse_ml_ignores_instruction_words_as_codes(self):
+        text = "Cupom\nComo usar\nCupom ativado\nIsso será aplicado no pagamento"
+        self.assertEqual(promotion_engine.parse_mercadolivre_text(text), [])
+
+    def test_parse_ml_uses_percent_cap_instead_of_fixed_discount(self):
+        text = "Cupom de 10% OFF, com limite de R$ 60"
+        promos = promotion_engine.parse_mercadolivre_text(text)
+        self.assertEqual(len(promos), 1)
+        promo = promos[0]
+        self.assertEqual(promo.code, "")
+        self.assertEqual(promo.discount_percent, 10.0)
+        self.assertIsNone(promo.discount_amount)
+        self.assertEqual(promo.max_discount, 60.0)
+        self.assertTrue(promo.selected_users_only)
+
     def test_catalog_picks_only_matching_keyword_and_minimum(self):
         catalog = {
             "mercadolivre": [

@@ -16,10 +16,12 @@ from typing import Iterable
 
 CACHE_PATH = Path(__file__).parent / "promotion_cache.json"
 STATE_PATH = Path(__file__).parent / "promotion_state.json"
+CACHE_SCHEMA_VERSION = 2
 
 _COMMON_FALSE_CODES = {
-    "APLICAR", "APROVEITE", "CUPOM", "CUPONS", "DESCONTO", "DISPONIVEL",
-    "DISPONÍVEL", "GANHE", "OFF", "RESGATE", "USAR", "USE", "VER",
+    "APLICAR", "APROVEITE", "ATIVADO", "CARBON", "COMERCIAL", "COMO",
+    "CUPOM", "CUPONS", "DESCONTO", "DISPONIVEL", "DISPONÍVEL", "GANHE",
+    "ISSO", "OFF", "POPULAR", "RESGATE", "USAR", "USE", "VER",
 }
 
 
@@ -210,8 +212,9 @@ def parse_mercadolivre_text(text: str) -> list[Promotion]:
 
     codes: list[str] = []
     code_patterns = [
-        r"(?i)(?:cupom|c[oó]digo)\s*(?::|\-|é|e)?\s*`?([A-Z0-9][A-Z0-9_-]{3,24})`?",
-        r"(?i)(?:use|aplique|usar)\s+(?:o\s+)?cupom\s+`?([A-Z0-9][A-Z0-9_-]{3,24})`?",
+        r"(?i:(?:use|aplique|usar)\s+(?:o\s+)?cupom)\s*[:\-]?\s*`?([A-Z0-9][A-Z0-9_-]{3,24})`?",
+        r"(?i:(?:cupom|c[oó]digo))\s*(?::|\-|é)\s*`?([A-Z0-9][A-Z0-9_-]{3,24})`?",
+        r"(?i:cupom)\s+`?([A-Z0-9]*\d[A-Z0-9_-]{3,24})`?",
     ]
     for pattern in code_patterns:
         for match in re.finditer(pattern, cleaned):
@@ -246,6 +249,19 @@ def parse_mercadolivre_text(text: str) -> list[Promotion]:
             percent = None
         break
 
+    max_discount = None
+    cap_patterns = [
+        r"(?i)(?:m[aá]ximo|limite|at[eé])(?:\s+de)?\s*R\$\s*([\d\.]+(?:,\d{1,2})?)",
+        r"(?i)R\$\s*([\d\.]+(?:,\d{1,2})?)\s*(?:de\s+)?(?:limite|m[aá]ximo)",
+    ]
+    for pattern in cap_patterns:
+        m = re.search(pattern, cleaned)
+        if m:
+            max_discount = _money(m.group(1))
+            break
+    if percent is not None and max_discount is not None and amount == max_discount:
+        amount = None
+
     minimum = 0.0
     min_patterns = [
         r"(?i)(?:acima de|a partir de|em compras de|mínimo|minimo)\s*R\$\s*([\d\.]+(?:,\d{1,2})?)",
@@ -257,7 +273,7 @@ def parse_mercadolivre_text(text: str) -> list[Promotion]:
             minimum = _money(m.group(1)) or 0.0
             break
 
-    selected = any(
+    selected = not codes or any(
         phrase in norm
         for phrase in ("usuarios selecionados", "usuários selecionados", "selecionados", "algumas contas")
     )
@@ -278,6 +294,7 @@ def parse_mercadolivre_text(text: str) -> list[Promotion]:
                 code=code,
                 discount_amount=amount,
                 discount_percent=percent,
+                max_discount=max_discount,
                 minimum_spend=minimum,
                 selected_users_only=selected,
                 app_only=app_only,
@@ -356,6 +373,7 @@ def save_cache(cache: dict) -> None:
 def get_cached_promotions(cache: dict, key: str, max_age_hours: int, promotion_max_age_hours: int | None = None) -> list[Promotion] | None:
     entry = cache.get(key)
     if not isinstance(entry, dict): return None
+    if entry.get("schema_version") != CACHE_SCHEMA_VERSION: return None
     checked_at = _parse_datetime(str(entry.get("checked_at", "")))
     if checked_at is None: return None
     raw_promos = entry.get("promotions", [])
@@ -372,6 +390,7 @@ def get_cached_promotions(cache: dict, key: str, max_age_hours: int, promotion_m
 
 def set_cached_promotions(cache: dict, key: str, promotions: Iterable[Promotion]) -> None:
     cache[key] = {
+        "schema_version": CACHE_SCHEMA_VERSION,
         "checked_at": datetime.now(UTC).isoformat(),
         "promotions": [promotion_to_dict(p) for p in promotions],
     }

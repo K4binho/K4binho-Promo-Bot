@@ -121,6 +121,7 @@ def test_positive_promotion_cache_expires_faster():
 def test_empty_cache_keeps_normal_ttl():
     cache = {
         "ml:1": {
+            "schema_version": promotion_engine.CACHE_SCHEMA_VERSION,
             "checked_at": (datetime.now(UTC) - timedelta(hours=3)).isoformat(),
             "promotions": [],
         }
@@ -128,6 +129,16 @@ def test_empty_cache_keeps_normal_ttl():
     assert promotion_engine.get_cached_promotions(
         cache, "ml:1", 6, promotion_max_age_hours=2
     ) == []
+
+
+def test_old_promotion_cache_is_invalidated_after_parser_change():
+    cache = {
+        "ml:1": {
+            "checked_at": datetime.now(UTC).isoformat(),
+            "promotions": [{"source": "mercadolivre", "code": "COMO"}],
+        }
+    }
+    assert promotion_engine.get_cached_promotions(cache, "ml:1", 6) is None
 
 
 def test_interactive_scanner_never_treats_buy_button_as_safe():

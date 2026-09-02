@@ -21,16 +21,24 @@ _LINK_RE2 = re.compile(r'href="([^"]+)"[^>]*class="poly-component__title"')
 _TITLE_RE = re.compile(r'class="poly-component__title"[^>]*>([^<]+)</a>')
 _CUR_RE = re.compile(
     r'andes-money-amount(?![^"]*previous)[^>]*aria-label="([\d.]+)\s*reais'
+    r'(?:\s+com\s+(\d+)\s+centavos)?'
 )
 _PREV_RE = re.compile(
     r'andes-money-amount--previous[^>]*aria-label="Antes:\s*([\d.]+)\s*reais'
+    r'(?:\s+com\s+(\d+)\s+centavos)?'
 )
-_ITEM_ID_RE = re.compile(r'/p/(MLB\d+)')
+_ITEM_ID_RE = re.compile(r'/(?:p/)?(MLB-?\d+)(?=[/?#&-]|$)')
 _SALES_RE = re.compile(r'\+?\s*([\d.]+)\s*mil\s*vendidos|\+?\s*(\d+)\s*vendidos')
 _RATING_RE = re.compile(r'poly_star_fill[^>]*></use></svg>\s*<span[^>]*>([\d,\.]+)</span>')
 _OFFICIAL_RE = re.compile(r'aria-label="Loja oficial"')
 _LABEL_RE = re.compile(r'class="polylabel-fs-xs polylabel-fw-semibold">([^<]+)</span>')
-_COUPON_RE = re.compile(r'poly-component__coupons.*?aria-label="([\d.]+)\s*reais"', re.DOTALL)
+_COUPON_BLOCK_RE = re.compile(
+    r'class="poly-component__coupons"(?P<body>.{0,1600}?)</div></div>',
+    re.DOTALL,
+)
+_COUPON_VALUE_RE = re.compile(
+    r'aria-label="([\d.]+)\s*reais(?:\s+com\s+(\d+)\s+centavos)?"'
+)
 
 
 def _to_float(raw: str) -> float | None:
@@ -41,6 +49,16 @@ def _to_float(raw: str) -> float | None:
         return float(raw)
     except ValueError:
         return None
+
+
+def _money_from_match(match: re.Match | None) -> float | None:
+    if not match:
+        return None
+    whole = _to_float(match.group(1))
+    if whole is None:
+        return None
+    cents = int(match.group(2) or 0)
+    return whole + cents / 100
 
 
 def _split_cards(html: str) -> list[str]:
@@ -65,15 +83,15 @@ def _parse_card(card: str) -> Deal | None:
     id_m = _ITEM_ID_RE.search(permalink)
     if not id_m:
         return None
-    item_id = id_m.group(1)
+    item_id = id_m.group(1).replace("-", "")
 
     title_m = _TITLE_RE.search(card)
     title = unescape(title_m.group(1).strip()) if title_m else ""
 
     cur_m = _CUR_RE.search(card)
     prev_m = _PREV_RE.search(card)
-    price = _to_float(cur_m.group(1)) if cur_m else None
-    original = _to_float(prev_m.group(1)) if prev_m else None
+    price = _money_from_match(cur_m)
+    original = _money_from_match(prev_m)
     if price is None:
         return None
 
@@ -88,7 +106,7 @@ def _parse_card(card: str) -> Deal | None:
         rating=_parse_rating(card),
         official_store=bool(_OFFICIAL_RE.search(card)),
         offer_label=_parse_label(card),
-        coupon_amount=_parse_coupon(card),
+        coupon_amount=_parse_coupon(card, price),
     )
 
 
@@ -116,14 +134,19 @@ def _parse_label(card: str) -> str:
     return unescape(m.group(1).strip()) if m else ""
 
 
-def _parse_coupon(card: str) -> float | None:
-    m = _COUPON_RE.search(card)
-    if not m:
+def _parse_coupon(card: str, price: float) -> float | None:
+    block_match = _COUPON_BLOCK_RE.search(card)
+    if not block_match:
         return None
-    try:
-        return float(m.group(1).replace(".", ""))
-    except ValueError:
+    block = block_match.group("body")
+    value = _money_from_match(_COUPON_VALUE_RE.search(block))
+    if value is None:
         return None
+    if re.search(r"OFF\s+com\s+Cupom", block, re.IGNORECASE):
+        return value
+    if re.search(r"com\s+Cupom", block, re.IGNORECASE) and 0 < value < price:
+        return round(price - value, 2)
+    return None
 
 
 def scrape_deals(min_discount: int, category_ids: list[str] | None = None) -> list[Deal]:

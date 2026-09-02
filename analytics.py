@@ -1,5 +1,6 @@
 import json
 import logging
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -7,6 +8,7 @@ from uuid import uuid4
 STORE_PATH = Path(__file__).parent / "analytics.jsonl"
 
 log = logging.getLogger("k4binho")
+_store_lock = threading.RLock()
 
 
 def _generate_deal_id() -> str:
@@ -75,26 +77,28 @@ def record_deal(
         "promotion_conditional": promotion_conditional,
     }
     try:
-        with open(STORE_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        with _store_lock:
+            with open(STORE_PATH, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except OSError as exc:
         log.error("[Analytics] falha ao gravar: %s", exc)
     return deal_id
 
 
 def load_entries(limit: int = 0) -> list[dict]:
-    if not STORE_PATH.exists():
-        return []
-    entries = []
-    with open(STORE_PATH, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+    with _store_lock:
+        if not STORE_PATH.exists():
+            return []
+        entries = []
+        with open(STORE_PATH, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
     if limit > 0:
         return entries[-limit:]
     return entries

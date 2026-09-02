@@ -1,4 +1,7 @@
+from collections import deque
 from html import escape
+import threading
+import time
 
 import httpx
 
@@ -6,6 +9,69 @@ import promotion_engine
 
 MESSAGE_URL = "https://api.telegram.org/bot{token}/sendMessage"
 PHOTO_URL = "https://api.telegram.org/bot{token}/sendPhoto"
+
+
+class TelegramRateLimiter:
+    """Limitador thread-safe por chat e para o total de mensagens."""
+
+    def __init__(
+        self,
+        chat_interval_seconds: float = 1.0,
+        global_messages_per_second: int = 30,
+        *,
+        clock=time.monotonic,
+        sleeper=time.sleep,
+    ) -> None:
+        self._lock = threading.Lock()
+        self._clock = clock
+        self._sleep = sleeper
+        self._next_by_chat: dict[str, float] = {}
+        self._global_sends: deque[float] = deque()
+        self.configure(chat_interval_seconds, global_messages_per_second)
+
+    def configure(
+        self,
+        chat_interval_seconds: float,
+        global_messages_per_second: int,
+    ) -> None:
+        if chat_interval_seconds < 0:
+            raise ValueError("chat_interval_seconds deve ser >= 0")
+        if global_messages_per_second < 1:
+            raise ValueError("global_messages_per_second deve ser >= 1")
+        with self._lock:
+            self.chat_interval_seconds = chat_interval_seconds
+            self.global_messages_per_second = global_messages_per_second
+            self._next_by_chat.clear()
+            self._global_sends.clear()
+
+    def wait(self, chat_id: str) -> None:
+        chat_key = str(chat_id)
+        while True:
+            with self._lock:
+                now = self._clock()
+                while self._global_sends and now - self._global_sends[0] >= 1.0:
+                    self._global_sends.popleft()
+
+                chat_wait = max(0.0, self._next_by_chat.get(chat_key, 0.0) - now)
+                global_wait = 0.0
+                if len(self._global_sends) >= self.global_messages_per_second:
+                    global_wait = max(0.0, self._global_sends[0] + 1.0 - now)
+                wait_for = max(chat_wait, global_wait)
+                if wait_for <= 0:
+                    self._next_by_chat[chat_key] = now + self.chat_interval_seconds
+                    self._global_sends.append(now)
+                    return
+            self._sleep(wait_for)
+
+
+_rate_limiter = TelegramRateLimiter()
+
+
+def configure_rate_limits(
+    chat_interval_seconds: float = 1.0,
+    global_messages_per_second: int = 30,
+) -> None:
+    _rate_limiter.configure(chat_interval_seconds, global_messages_per_second)
 
 
 def send_message(token: str, channel_id: str, text: str,
@@ -29,6 +95,7 @@ def send_message(token: str, channel_id: str, text: str,
         }
     if thread_id is not None:
         payload["message_thread_id"] = thread_id
+    _rate_limiter.wait(str(channel_id))
     resp = httpx.post(url, json=payload, timeout=30)
     resp.raise_for_status()
 

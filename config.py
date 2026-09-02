@@ -17,6 +17,13 @@ def _get_int(name: str, default: int) -> int:
     return int(raw.strip())
 
 
+def _get_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return float(raw.strip())
+
+
 def _get_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None or not raw.strip():
@@ -93,6 +100,15 @@ class Config:
         default_factory=lambda: _get_bool("PROMOTION_CAMPAIGN_NOTICES_ENABLED", True)
     )
     poll_interval_seconds: int = field(default_factory=lambda: _get_int("POLL_INTERVAL_SECONDS", 1800))
+    source_max_concurrency: int = field(
+        default_factory=lambda: _get_int("SOURCE_MAX_CONCURRENCY", 5)
+    )
+    telegram_chat_interval_seconds: float = field(
+        default_factory=lambda: _get_float("TELEGRAM_CHAT_INTERVAL_SECONDS", 1.0)
+    )
+    telegram_global_messages_per_second: int = field(
+        default_factory=lambda: _get_int("TELEGRAM_GLOBAL_MESSAGES_PER_SECOND", 30)
+    )
     max_posts_per_cycle: int = field(default_factory=lambda: _get_int("MAX_POSTS_PER_CYCLE", 3))
     telegram_steam_thread_id: int | None = field(
         default_factory=lambda: _get_int("TELEGRAM_STEAM_THREAD_ID", 0) or None
@@ -116,10 +132,23 @@ class Config:
     steam_min_waitlisted: int = field(
         default_factory=lambda: _get_int("STEAM_MIN_WAITLISTED", 1000)
     )
-    cj_account_sid: str = field(default_factory=lambda: _get("CJ_ACCOUNT_SID"))
-    cj_auth_token: str = field(default_factory=lambda: _get("CJ_AUTH_TOKEN"))
+    cj_account_sid: str = field(
+        default_factory=lambda: _get("IMPACT_ACCOUNT_SID") or _get("CJ_ACCOUNT_SID")
+    )
+    cj_auth_token: str = field(
+        default_factory=lambda: _get("IMPACT_AUTH_TOKEN") or _get("CJ_AUTH_TOKEN")
+    )
     gmg_program_id: str = field(default_factory=lambda: _get("GMG_PROGRAM_ID"))
     gmg_catalog_id: str = field(default_factory=lambda: _get("GMG_CATALOG_ID"))
+    gmg_catalog_currency: str = field(
+        default_factory=lambda: _get("GMG_CATALOG_CURRENCY") or "BRL"
+    )
+    gmg_catalog_page_size: int = field(
+        default_factory=lambda: _get_int("GMG_CATALOG_PAGE_SIZE", 1000)
+    )
+    gmg_catalog_max_pages: int = field(
+        default_factory=lambda: _get_int("GMG_CATALOG_MAX_PAGES", 10)
+    )
     telegram_gmg_thread_id: int | None = field(
         default_factory=lambda: _get_int("TELEGRAM_GMG_THREAD_ID", 0) or None
     )
@@ -182,4 +211,14 @@ class Config:
             errors.append("TELEGRAM_BOT_TOKEN vazio")
         if not self.telegram_channel_id:
             errors.append("TELEGRAM_CHANNEL_ID vazio")
+        if self.source_max_concurrency < 1:
+            errors.append("SOURCE_MAX_CONCURRENCY deve ser >= 1")
+        if self.telegram_chat_interval_seconds < 0:
+            errors.append("TELEGRAM_CHAT_INTERVAL_SECONDS deve ser >= 0")
+        if self.telegram_global_messages_per_second < 1:
+            errors.append("TELEGRAM_GLOBAL_MESSAGES_PER_SECOND deve ser >= 1")
+        if not 1 <= self.gmg_catalog_page_size <= 1000:
+            errors.append("GMG_CATALOG_PAGE_SIZE deve estar entre 1 e 1000")
+        if self.gmg_catalog_max_pages < 1:
+            errors.append("GMG_CATALOG_MAX_PAGES deve ser >= 1")
         return errors

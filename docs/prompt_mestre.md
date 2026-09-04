@@ -24,8 +24,9 @@ Objetivos:
 
 - Mercado Livre: comercial e prioridade alta.
 - AliExpress: comercial.
+- Shopee: comercial, API de Afiliados oficial, ciclo ativo em `bot.py`.
 - Steam/Nuuvem/GMG: PLUS/editorial.
-- Shopee: integração real ainda pendente; não fingir suporte completo.
+- Kabum: módulo isolado, ainda fora do orquestrador; não considerar fonte ativa.
 
 Não remova PLUS só porque não monetiza diretamente.
 
@@ -60,7 +61,7 @@ Sources
 - produto visto pode voltar por nova promoção + queda relevante + cooldown;
 - histórico de preço armazena preço listado, não cupom temporário;
 - logs do funil ML possuem diagnóstico de scan/cache/fallback/revival;
-- CI e suíte completa: 114 testes passando.
+- CI e suíte completa: 122 testes passando (verificado em 2026-09-01).
 
 ### 🧪 Precisa validação real
 
@@ -80,6 +81,7 @@ Sources
 - Não adicionar lojas antes de estabilizar medição de cliques/conversões.
 - Mudança nova precisa de teste de regressão.
 - Atualize `README.md`, `ROADMAP.md`, `OPERACAO.md` e `ProximosPasso.md` quando o estado real mudar.
+- Não registre contagem de testes sem executar `python -m pytest -q`.
 
 ## Diagnóstico esperado
 
@@ -106,4 +108,4 @@ Nunca exponha `.env`, token Telegram, chaves de API, `ml_token.json`, `ml_profil
 4. medir cliques por fonte/categoria/promoção;
 5. só então ajustar scoring com comportamento real;
 6. SQLite depois da estabilização comercial;
-7. Shopee quando houver integração verdadeira.
+7. validar Shopee em produção com credenciais reais (após rotacionar o secret).

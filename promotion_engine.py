@@ -25,6 +25,11 @@ _COMMON_FALSE_CODES = {
 }
 
 
+SCOPE_PRODUCT = "product"
+SCOPE_STORE = "store"
+SCOPE_PLATFORM = "platform"
+
+
 @dataclass
 class Promotion:
     source: str
@@ -44,13 +49,28 @@ class Promotion:
     match_keywords: list[str] = field(default_factory=list)
     enabled: bool = True
     confidence: str = "manual"
+    scope: str = SCOPE_PRODUCT
+    store_ids: list[str] = field(default_factory=list)
+    category_ids: list[str] = field(default_factory=list)
+    product_ids: list[str] = field(default_factory=list)
+    usage_remaining: int | None = None
 
     @property
     def conditional(self) -> bool:
         return self.selected_users_only or self.app_only or self.requires_coins
 
+    @property
+    def has_benefit(self) -> bool:
+        return bool(
+            (self.discount_amount or 0) > 0
+            or (self.discount_percent or 0) > 0
+            or self.rescue_url
+        )
+
     def active(self, now: datetime | None = None) -> bool:
         if not self.enabled:
+            return False
+        if self.usage_remaining is not None and self.usage_remaining <= 0:
             return False
         current = now or datetime.now(UTC)
         start = _parse_datetime(self.starts_at)
@@ -61,8 +81,22 @@ class Promotion:
             return False
         return True
 
-    def matches(self, title: str, price: float) -> bool:
+    def matches(
+        self,
+        title: str,
+        price: float,
+        *,
+        store_id: str = "",
+        category_ids: Iterable[str] = (),
+        product_id: str = "",
+    ) -> bool:
         if price < max(0.0, self.minimum_spend):
+            return False
+        if not _id_allowed(self.product_ids, [product_id]):
+            return False
+        if not _id_allowed(self.store_ids, [store_id]):
+            return False
+        if not _id_allowed(self.category_ids, category_ids):
             return False
         if not self.match_keywords:
             return True
@@ -70,17 +104,20 @@ class Promotion:
         return any(_normalize(keyword) in norm for keyword in self.match_keywords if keyword)
 
     def savings_for(self, price: float) -> float:
-        if not self.matches("", price) and not self.match_keywords:
+        if price < max(0.0, self.minimum_spend):
             return 0.0
-        savings = 0.0
+        candidates: list[float] = []
         if self.discount_amount is not None:
-            savings = max(savings, float(self.discount_amount))
+            candidates.append(float(self.discount_amount))
         if self.discount_percent is not None:
-            pct = max(0.0, float(self.discount_percent)) / 100.0
-            pct_value = price * pct
+            pct_value = price * max(0.0, float(self.discount_percent)) / 100.0
             if self.max_discount is not None:
                 pct_value = min(pct_value, float(self.max_discount))
-            savings = max(savings, pct_value)
+            candidates.append(pct_value)
+        if not candidates:
+            return 0.0
+        # Regras concorrentes descrevem o MESMO cupom: nunca promete a maior.
+        savings = min(candidates) if len(candidates) > 1 else candidates[0]
         return min(max(0.0, savings), max(0.0, price))
 
 
@@ -119,6 +156,20 @@ def _normalize(text: str) -> str:
     return "".join(c for c in raw if not unicodedata.combining(c))
 
 
+def _id_allowed(allowed: Iterable[str], candidates: Iterable[str]) -> bool:
+    """Restrição por ID só reprova quando há lista E ela não casa.
+
+    Sem lista, o cupom não é restrito por esse eixo. Com lista mas sem ID
+    conhecido do produto, o cupom é reprovado: não há evidência de que ele
+    se aplique.
+    """
+    wanted = {str(a).strip().lower() for a in allowed if str(a).strip()}
+    if not wanted:
+        return True
+    got = {str(c).strip().lower() for c in candidates if str(c).strip()}
+    return bool(got & wanted)
+
+
 def _parse_datetime(raw: str) -> datetime | None:
     if not raw:
         return None
@@ -136,9 +187,23 @@ def evaluate_price(
     promotions: Iterable[Promotion],
     *,
     title: str = "",
+    store_id: str = "",
+    category_ids: Iterable[str] = (),
+    product_id: str = "",
     now: datetime | None = None,
 ) -> PriceEvaluation:
-    active = [p for p in promotions if p.active(now) and p.matches(title, base_price)]
+    active = [
+        p
+        for p in promotions
+        if p.active(now)
+        and p.matches(
+            title,
+            base_price,
+            store_id=store_id,
+            category_ids=category_ids,
+            product_id=product_id,
+        )
+    ]
     guaranteed: list[tuple[float, Promotion]] = []
     conditional: list[tuple[float, Promotion]] = []
 
@@ -273,6 +338,9 @@ def parse_mercadolivre_text(text: str) -> list[Promotion]:
             minimum = _money(m.group(1)) or 0.0
             break
 
+    # Sem código visível, o cupom da PDP costuma ser coletável pela conta
+    # logada no scanner — não vale para todo comprador. Fica condicional para
+    # não prometer desconto que outra pessoa não recebe.
     selected = not codes or any(
         phrase in norm
         for phrase in ("usuarios selecionados", "usuários selecionados", "selecionados", "algumas contas")
@@ -321,12 +389,51 @@ def promotion_fingerprint(promo: Promotion | None) -> str:
     return "|".join(str(v) for v in parts)
 
 
+def is_trustworthy(promo: Promotion) -> bool:
+    """Rejeita promoção sem evidência suficiente para ser anunciada.
+
+    Um código só é aceito se não estiver na lista de palavras de layout e
+    tiver algum benefício associado (valor, percentual ou página de resgate).
+    """
+    code = (promo.code or "").strip().upper()
+    if code and code in _COMMON_FALSE_CODES:
+        return False
+    if code and not any(ch.isdigit() for ch in code) and len(code) < 5:
+        return False
+    return promo.has_benefit or bool(code)
+
+
+def merge_promotions(*groups: Iterable[Promotion] | None) -> list[Promotion]:
+    """Une promoções de várias origens sem duplicar a mesma regra."""
+    merged: list[Promotion] = []
+    seen: set[str] = set()
+    for group in groups:
+        for promo in group or []:
+            if not is_trustworthy(promo):
+                continue
+            key = promotion_fingerprint(promo)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(promo)
+    return merged
+
+
 def load_catalog(path: str | Path) -> dict:
+    """Carrega o catálogo manual de cupons.
+
+    Se o arquivo configurado não existir, cai no `.example` versionado para
+    que a estrutura continue válida (todas as entradas de exemplo têm
+    `enabled: false`, então nada é anunciado sem confirmação).
+    """
     p = Path(path)
     if not p.is_absolute():
         p = Path(__file__).parent / p
     if not p.exists():
-        return {}
+        fallback = p.with_name(f"{p.stem}.example{p.suffix}")
+        if not fallback.exists():
+            return {}
+        p = fallback
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -334,7 +441,21 @@ def load_catalog(path: str | Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def promotions_for_item(catalog: dict, source: str, title: str, price: float) -> list[Promotion]:
+def promotions_for_item(
+    catalog: dict,
+    source: str,
+    title: str,
+    price: float,
+    *,
+    store_id: str = "",
+    category_ids: Iterable[str] = (),
+    product_id: str = "",
+) -> list[Promotion]:
+    """Cupons do catálogo aplicáveis ao item, em qualquer escopo.
+
+    Entradas de escopo `platform` valem para o provider inteiro; `store` e
+    `product` só entram quando o ID do item casa com a restrição.
+    """
     entries = catalog.get(source, []) if isinstance(catalog, dict) else []
     if not isinstance(entries, list):
         return []
@@ -346,7 +467,15 @@ def promotions_for_item(catalog: dict, source: str, title: str, price: float) ->
             promo = promotion_from_dict({"source": source, **raw})
         except (TypeError, ValueError):
             continue
-        if promo.active() and promo.matches(title, price):
+        if not promo.active():
+            continue
+        if promo.matches(
+            title,
+            price,
+            store_id=store_id,
+            category_ids=category_ids,
+            product_id=product_id,
+        ):
             promos.append(promo)
     return promos
 
@@ -371,20 +500,29 @@ def save_cache(cache: dict) -> None:
 
 
 def get_cached_promotions(cache: dict, key: str, max_age_hours: int, promotion_max_age_hours: int | None = None) -> list[Promotion] | None:
+    """Promoções em cache para a chave, ou None quando precisa reescanear.
+
+    Entrada de schema antigo é reaproveitada apenas quando ela registrou
+    "nenhuma promoção": esse resultado não depende do parser. Se ela guardou
+    promoções vindas de um parser anterior, devolve None para reescanear em
+    vez de anunciar cupom que talvez nunca tenha existido.
+    """
     entry = cache.get(key)
     if not isinstance(entry, dict): return None
-    if entry.get("schema_version") != CACHE_SCHEMA_VERSION: return None
     checked_at = _parse_datetime(str(entry.get("checked_at", "")))
     if checked_at is None: return None
     raw_promos = entry.get("promotions", [])
     if not isinstance(raw_promos, list): raw_promos=[]
+    legacy = entry.get("schema_version") != CACHE_SCHEMA_VERSION
+    if legacy and raw_promos: return None
     ttl = promotion_max_age_hours if raw_promos and promotion_max_age_hours is not None else max_age_hours
     if datetime.now(UTC) - checked_at > timedelta(hours=max(1, ttl)): return None
     promos=[]
     for raw in raw_promos:
         if isinstance(raw, dict):
-            try: promos.append(promotion_from_dict(raw))
+            try: promo = promotion_from_dict(raw)
             except (TypeError, ValueError): continue
+            if is_trustworthy(promo): promos.append(promo)
     return promos
 
 

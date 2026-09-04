@@ -493,6 +493,180 @@ def score_aliexpress(
     )
 
 
+def score_kabum(
+    title: str,
+    price: float,
+    original_price: float | None,
+    discount_percent: int,
+    effective_price: float | None = None,
+    promotion_savings: float = 0.0,
+    promotion_code: str = "",
+) -> ScoreResult:
+    from price_history import history_confidence
+
+    category = category_match(title)
+    scored_price = min(price, effective_price) if effective_price is not None else price
+    effective_discount = discount_percent
+    if original_price and original_price > scored_price:
+        effective_discount = round((original_price - scored_price) / original_price * 100)
+
+    q, q_reasons = quality_score(
+        discount_percent=effective_discount,
+        price=scored_price,
+        min_price_30d=None,
+        avg_price_30d=None,
+        obs_count=0,
+        rating=None,
+        official_store=False,
+        offer_label="",
+    )
+
+    conv, conv_reasons = conversion_score(
+        price=scored_price,
+        sales_count=0,
+        discount_percent=effective_discount,
+        is_best_seller=False,
+        is_trending=False,
+        category=category,
+    )
+
+    ret, ret_reasons = retention_score(
+        discount_percent=effective_discount,
+        is_lowest_price=False,
+        category=category,
+        is_plus=False,
+    )
+
+    conf_pts = 0
+    conf_reasons: list[str] = []
+    if effective_discount >= 40:
+        conf_pts += 15
+        conf_reasons.append(f"desconto alto kabum ({effective_discount}%) (+15)")
+    elif effective_discount >= 20:
+        conf_pts += 5
+        conf_reasons.append(f"desconto razoavel kabum ({effective_discount}%) (+5)")
+    conf_pts = _clamp(conf_pts)
+
+    promo_reasons: list[str] = []
+    if promotion_savings > 0 and price > 0:
+        savings_pct = promotion_savings / price * 100
+        q = _clamp(q + (15 if savings_pct >= 10 else 8))
+        conv = _clamp(conv + (15 if savings_pct >= 10 else 8))
+        promo_reasons.append(f"cupom reduz {savings_pct:.0f}% (+boost comercial)")
+        if promotion_code:
+            conv = _clamp(conv + 5)
+            promo_reasons.append(f"cupom {promotion_code} identificado (+5 conversao)")
+
+    all_reasons = q_reasons + conv_reasons + ret_reasons + conf_reasons + promo_reasons
+    f = final_score(q, conv, ret, conf_pts, weights=COMMERCIAL_WEIGHTS)
+    total = round(f)
+
+    return ScoreResult(
+        total=total,
+        price_subtotal=0,
+        reasons=all_reasons,
+        quality=q,
+        conversion=conv,
+        retention=ret,
+        confidence=conf_pts,
+        final=f,
+        history_confidence=history_confidence(0),
+    )
+
+
+def score_shopee(
+    title: str,
+    price: float,
+    original_price: float | None,
+    discount_percent: int,
+    sales_count: int = 0,
+    commission_rate: float = 0,
+    rating: float = 0.0,
+    effective_price: float | None = None,
+    promotion_savings: float = 0.0,
+    promotion_code: str = "",
+) -> ScoreResult:
+    from price_history import history_confidence
+
+    category = category_match(title)
+    scored_price = min(price, effective_price) if effective_price is not None else price
+    effective_discount = discount_percent
+    if original_price and original_price > scored_price:
+        effective_discount = round((original_price - scored_price) / original_price * 100)
+
+    q, q_reasons = quality_score(
+        discount_percent=effective_discount,
+        price=scored_price,
+        min_price_30d=None,
+        avg_price_30d=None,
+        obs_count=0,
+        rating=rating or None,
+        official_store=False,
+        offer_label="",
+    )
+
+    conv, conv_reasons = conversion_score(
+        price=scored_price,
+        sales_count=sales_count,
+        discount_percent=effective_discount,
+        is_best_seller=sales_count >= 5000,
+        is_trending=False,
+        category=category,
+    )
+
+    ret, ret_reasons = retention_score(
+        discount_percent=effective_discount,
+        is_lowest_price=False,
+        category=category,
+        is_plus=False,
+    )
+
+    conf_pts = 0
+    conf_reasons: list[str] = []
+    if sales_count >= 1000:
+        conf_pts += 40
+        conf_reasons.append(f"volume alto shopee ({sales_count} vendas) (+40)")
+    elif sales_count >= 100:
+        conf_pts += 20
+        conf_reasons.append(f"volume razoavel shopee ({sales_count} vendas) (+20)")
+    elif sales_count >= 10:
+        conf_pts += 5
+        conf_reasons.append(f"poucas vendas shopee ({sales_count}) (+5)")
+    else:
+        conf_pts -= 10
+        conf_reasons.append("sem vendas shopee (-10)")
+    if rating and rating >= 4.5:
+        conf_pts += 10
+        conf_reasons.append(f"loja bem avaliada ({rating:.1f}) (+10)")
+    conf_pts = _clamp(conf_pts)
+
+    promo_reasons: list[str] = []
+    if promotion_savings > 0 and price > 0:
+        savings_pct = promotion_savings / price * 100
+        q = _clamp(q + (15 if savings_pct >= 10 else 8))
+        conv = _clamp(conv + (15 if savings_pct >= 10 else 8))
+        promo_reasons.append(f"cupom reduz {savings_pct:.0f}% (+boost comercial)")
+        if promotion_code:
+            conv = _clamp(conv + 5)
+            promo_reasons.append(f"cupom {promotion_code} identificado (+5 conversao)")
+
+    all_reasons = q_reasons + conv_reasons + ret_reasons + conf_reasons + promo_reasons
+    f = final_score(q, conv, ret, conf_pts, weights=COMMERCIAL_WEIGHTS)
+    total = round(f)
+
+    return ScoreResult(
+        total=total,
+        price_subtotal=0,
+        reasons=all_reasons,
+        quality=q,
+        conversion=conv,
+        retention=ret,
+        confidence=conf_pts,
+        final=f,
+        history_confidence=history_confidence(0),
+    )
+
+
 def score_game(
     title: str,
     price: float,

@@ -96,6 +96,19 @@ class Config:
     ml_promo_revival_min_drop_amount: int = field(
         default_factory=lambda: _get_int("ML_PROMO_REVIVAL_MIN_DROP_AMOUNT", 20)
     )
+    # Dedup/republicacao (AliExpress, Shopee, Kabum, Steam, Nuuvem, GMG):
+    # depois de publicado, so republica de novo se preco cair o suficiente,
+    # bater o menor preco historico, ou passar esse numero de dias (0 = nunca
+    # republica so por tempo, so por preco).
+    repost_min_days: int | None = field(
+        default_factory=lambda: (_get_int("REPOST_MIN_DAYS", 0) or None)
+    )
+    repost_min_drop_percent: float = field(
+        default_factory=lambda: _get_float("REPOST_MIN_DROP_PERCENT", 10.0)
+    )
+    repost_min_drop_amount: float = field(
+        default_factory=lambda: _get_float("REPOST_MIN_DROP_AMOUNT", 20.0)
+    )
     promotion_campaign_notices_enabled: bool = field(
         default_factory=lambda: _get_bool("PROMOTION_CAMPAIGN_NOTICES_ENABLED", True)
     )
@@ -175,6 +188,29 @@ class Config:
     aliexpress_searches: list[tuple[str, str]] = field(
         default_factory=lambda: _parse_searches("ALIEXPRESS_SEARCHES")
     )
+    shopee_app_id: str = field(default_factory=lambda: _get("SHOPEE_APP_ID"))
+    shopee_app_secret: str = field(default_factory=lambda: _get("SHOPEE_APP_SECRET"))
+    shopee_keywords: list[str] = field(default_factory=lambda: _get_list("SHOPEE_KEYWORDS"))
+    telegram_shopee_thread_id: int | None = field(
+        default_factory=lambda: _get_int("TELEGRAM_SHOPEE_THREAD_ID", 0) or None
+    )
+    shopee_min_discount_percent: int = field(
+        default_factory=lambda: _get_int("SHOPEE_MIN_DISCOUNT_PERCENT", 30)
+    )
+    shopee_max_posts_per_cycle: int = field(
+        default_factory=lambda: _get_int("SHOPEE_MAX_POSTS_PER_CYCLE", 3)
+    )
+    kabum_awin_token: str = field(default_factory=lambda: _get("KABUM_AWIN_TOKEN"))
+    kabum_publisher_id: int = field(default_factory=lambda: _get_int("KABUM_PUBLISHER_ID", 0))
+    telegram_kabum_thread_id: int | None = field(
+        default_factory=lambda: _get_int("TELEGRAM_KABUM_THREAD_ID", 0) or None
+    )
+    kabum_min_discount_percent: int = field(
+        default_factory=lambda: _get_int("KABUM_MIN_DISCOUNT_PERCENT", 15)
+    )
+    kabum_max_posts_per_cycle: int = field(
+        default_factory=lambda: _get_int("KABUM_MAX_POSTS_PER_CYCLE", 3)
+    )
     telegram_nuuvem_thread_id: int | None = field(
         default_factory=lambda: _get_int("TELEGRAM_NUUVEM_THREAD_ID", 0) or None
     )
@@ -204,6 +240,23 @@ class Config:
     )
     click_server_port: int = field(default_factory=lambda: _get_int("CLICK_SERVER_PORT", 8321))
     click_base_url: str = field(default_factory=lambda: _get("CLICK_BASE_URL", "http://localhost:8321"))
+    hunt_enabled: bool = field(default_factory=lambda: _get_bool("HUNT_ENABLED", True))
+    hunt_per_source_limit: int = field(
+        default_factory=lambda: _get_int("HUNT_PER_SOURCE_LIMIT", 20)
+    )
+    hunt_results_per_reply: int = field(
+        default_factory=lambda: _get_int("HUNT_RESULTS_PER_REPLY", 3)
+    )
+    command_rate_limit_per_minute: int = field(
+        default_factory=lambda: _get_int("COMMAND_RATE_LIMIT_PER_MINUTE", 12)
+    )
+    hunt_rate_limit_per_hour: int = field(
+        default_factory=lambda: _get_int("HUNT_RATE_LIMIT_PER_HOUR", 10)
+    )
+    hunt_global_rate_limit_per_minute: int = field(
+        default_factory=lambda: _get_int("HUNT_GLOBAL_RATE_LIMIT_PER_MINUTE", 30)
+    )
+    max_alerts_per_chat: int = field(default_factory=lambda: _get_int("MAX_ALERTS_PER_CHAT", 10))
 
     def validate(self) -> list[str]:
         errors = []
@@ -221,4 +274,12 @@ class Config:
             errors.append("GMG_CATALOG_PAGE_SIZE deve estar entre 1 e 1000")
         if self.gmg_catalog_max_pages < 1:
             errors.append("GMG_CATALOG_MAX_PAGES deve ser >= 1")
+        if self.command_rate_limit_per_minute < 1:
+            errors.append("COMMAND_RATE_LIMIT_PER_MINUTE deve ser >= 1")
+        if self.hunt_rate_limit_per_hour < 1:
+            errors.append("HUNT_RATE_LIMIT_PER_HOUR deve ser >= 1")
+        if self.hunt_global_rate_limit_per_minute < 1:
+            errors.append("HUNT_GLOBAL_RATE_LIMIT_PER_MINUTE deve ser >= 1")
+        if self.max_alerts_per_chat < 1:
+            errors.append("MAX_ALERTS_PER_CHAT deve ser >= 1")
         return errors

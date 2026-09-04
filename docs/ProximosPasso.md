@@ -18,7 +18,7 @@ A prioridade deixou de ser criar mais fontes e passou a ser **fazer o Mercado Li
 - nova promoção pode reativar produto visto quando reduz de verdade o preço efetivo;
 - revival tem cooldown e queda mínima;
 - logs ML ganharam diagnóstico detalhado;
-- suíte completa: **114 testes passando**.
+- suíte completa: **122 testes passando** (verificado em 2026-09-01).
 
 ## Prioridade 1 — validar V1.1 ao vivo
 
@@ -62,9 +62,9 @@ Publicar `/go/{deal_id}` em HTTPS público. Depois medir cliques por:
 
 Não mexer automaticamente nos pesos do score até existir volume de dados suficiente.
 
-## Prioridade 4 — Shopee
+## Concluído — Shopee
 
-Só implementar ciclo comercial real quando houver acesso confiável à fonte/API e aos links afiliados. Não criar integração fictícia só para marcar etapa como concluída.
+Ciclo comercial real implementado (API oficial de Afiliados, GraphQL). Falta apenas validar com credenciais reais em `--dry-run` após rotacionar `SHOPEE_APP_SECRET`.
 
 ## Prioridade 5 — SQLite
 
@@ -79,6 +79,7 @@ Depois que ML V1.1 estiver estável, migrar estados persistentes de JSON para SQ
 - não raspar centenas de páginas ML a cada ciclo;
 - não deixar produto já visto ser republicado só porque o texto do cupom mudou;
 - não versionar segredos, perfil do Chrome ou logs operacionais.
+- não ativar Kabum no ciclo principal sem validar fonte, afiliação e testes (Shopee já validado por testes e ativo).
 
 ## Próximo checkpoint
 

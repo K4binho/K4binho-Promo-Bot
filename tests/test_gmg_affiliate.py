@@ -60,3 +60,73 @@ def test_catalog_items_respect_page_limit():
         )
 
     assert get.call_count == 3
+
+
+def test_promotion_from_deal_embedded_code_is_scoped_to_product():
+    deal = gmg_cj.GmgDeal(
+        item_id="42", title="Jogo X", price=50.0, original_price=100.0,
+        discount_percent=50.0, permalink="https://track", image_url="",
+        promo_code="GMG10", promo_description="10% em jogos selecionados",
+        promo_is_platform_wide=False,
+    )
+    promo = gmg_cj.promotion_from_deal(deal)
+    assert promo is not None
+    assert promo.code == "GMG10"
+    assert promo.scope == "product"
+    assert promo.product_ids == ["42"]
+
+
+def test_promotion_from_deal_platform_fallback_is_scoped_to_platform():
+    deal = gmg_cj.GmgDeal(
+        item_id="42", title="Jogo X", price=50.0, original_price=100.0,
+        discount_percent=50.0, permalink="https://track", image_url="",
+        promo_code="ACCOUNTWIDE", promo_description="Cupom geral da conta",
+        promo_is_platform_wide=True,
+    )
+    promo = gmg_cj.promotion_from_deal(deal)
+    assert promo.scope == "platform"
+    assert promo.product_ids == []
+
+
+def test_promotion_from_deal_without_code_returns_none():
+    deal = gmg_cj.GmgDeal(
+        item_id="1", title="Jogo", price=10.0, original_price=None,
+        discount_percent=0.0, permalink="", image_url="",
+    )
+    assert gmg_cj.promotion_from_deal(deal) is None
+
+
+def test_merge_promotions_rejects_layout_false_positive_code():
+    import promotion_engine
+
+    deal = gmg_cj.GmgDeal(
+        item_id="9", title="Jogo Y", price=20.0, original_price=40.0,
+        discount_percent=50.0, permalink="", image_url="",
+        promo_code="ATIVADO", promo_description="", promo_is_platform_wide=True,
+    )
+    embedded = gmg_cj.promotion_from_deal(deal)
+    merged = promotion_engine.merge_promotions([embedded])
+    assert merged == []
+
+
+def test_manual_catalog_coupon_applies_when_no_embedded_code():
+    import promotion_engine
+
+    deal = gmg_cj.GmgDeal(
+        item_id="9", title="Jogo Y", price=20.0, original_price=40.0,
+        discount_percent=50.0, permalink="", image_url="",
+    )
+    catalog = {
+        "gmg": [
+            {"enabled": True, "kind": "coupon", "code": "GMGLOJA5", "scope": "platform"}
+        ]
+    }
+    embedded = gmg_cj.promotion_from_deal(deal)
+    catalog_promos = promotion_engine.promotions_for_item(
+        catalog, "gmg", deal.title, deal.price, product_id=deal.item_id
+    )
+    merged = promotion_engine.merge_promotions(
+        [embedded] if embedded else [], catalog_promos
+    )
+    assert len(merged) == 1
+    assert merged[0].code == "GMGLOJA5"

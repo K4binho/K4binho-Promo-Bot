@@ -2,6 +2,8 @@
 
 Bot de curadoria de ofertas para Telegram com fontes comerciais e conteúdo PLUS/editorial.
 
+Este é o guia técnico. Para instalação rápida, comece pelo [`README.md` da raiz](../README.md).
+
 ## Objetivo
 
 O sistema não busca apenas o maior percentual de desconto. Ele combina preço, histórico, qualidade, demanda, conversão, retenção e confiança para selecionar oportunidades úteis ao usuário e sustentáveis para o negócio.
@@ -34,6 +36,37 @@ fontes
 
 Essas fontes ajudam aquisição e retenção e não devem ser tratadas como equivalentes comerciais ao ML/Ali.
 
+### Comerciais (novos)
+
+- Shopee — API de Afiliados oficial (GraphQL), produtos + cupons de campanha + deeplink; participa do ciclo principal via `run_shopee_cycle` e valida o link antes de publicar.
+
+### Integração ajustada
+
+- Green Man Gaming (GMG) — cupons agora passam pelo motor unificado (`promotion_engine.py`), com escopo produto/loja/plataforma e filtro de confiança, igual às demais fontes.
+
+### Preparada, mas não ativa
+
+- Kabum possui scraper e geração de link, porém não é chamada pelo orquestrador atual.
+
+## Componentes principais
+
+| Componente | Responsabilidade |
+| --- | --- |
+| `bot.py` | Orquestra os ciclos, seleção, publicação, digest e persistência. |
+| `config.py` | Carrega o `.env`, aplica defaults e valida Telegram. |
+| `scoring.py` | Calcula qualidade, conversão, retenção, confiança e score final. |
+| `promotion_engine.py` | Avalia cupons/campanhas, preço garantido ou potencial e caches. |
+| `ml_playwright.py` | Mantém a sessão do ML, descobre promoções e gera links afiliados. Roda com Chrome "de verdade" mas fora da área visível do monitor (`offscreen`), evitando roubar foco e o throttling de aba em segundo plano. |
+| `telegram.py` | Formata e envia mensagens. |
+| `bot_commands.py` | Processa `/start`, alertas e `/status`; comandos administrativos são protegidos. |
+| `*_store.py` e `price_history.py` | Persistem estado local em JSON/JSONL. |
+| `click_server.py` e `click_tracker.py` | Redirect opcional e métricas de clique. |
+| `link_validation.py` | Checagem de rede na hora de publicar (404/410 bloqueia; falha ambígua não bloqueia). |
+| `migrate_promotion_cache.py` | Script de migração pontual do cache de promoções para o formato atual. |
+
+O processo usa a porta local `47591` como trava de instância única. Uma segunda
+execução encerra sem iniciar outro ciclo.
+
 ## Promotion Engine V1.1
 
 O Mercado Livre agora possui:
@@ -55,10 +88,19 @@ O histórico de preço continua usando o preço público listado para não conta
 A suíte automatizada atual possui:
 
 ```text
-114 passed
+188 passed
 ```
 
 O GitHub Actions executa validação de sintaxe e a suíte completa em pushes/PRs.
+
+Execução local recomendada:
+
+```powershell
+python -m pytest -q
+python bot.py --dry-run  # um ciclo sem publicar
+python bot.py --once     # um ciclo com publicação
+python bot.py            # execução contínua
+```
 
 ## Configuração
 
@@ -85,7 +127,7 @@ A V1.1 está implementada e testada, mas a interação com a interface real do M
 
 Consulte também:
 
-- `ROADMAP.md`
-- `ProximosPasso.md`
-- `OPERACAO.md`
-- `prompt_mestre.md`
+- [Roadmap](ROADMAP.md)
+- [Próximos passos](ProximosPasso.md)
+- [Operação](OPERACAO.md)
+- [Prompt mestre](prompt_mestre.md)

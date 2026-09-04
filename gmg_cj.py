@@ -44,6 +44,7 @@ class GmgDeal:
     image_url: str
     promo_code: str | None = None
     promo_description: str | None = None
+    promo_is_platform_wide: bool = False
 
 
 def _auth(account_sid: str, auth_token: str) -> httpx.BasicAuth:
@@ -294,6 +295,7 @@ def parse_deals(
         promo_description = first_promo.get("PromotionTitle") or (
             fallback_desc if promo_code == fallback_code else None
         )
+        is_platform_wide = bool(promo_code) and not first_promo.get("GenericRedemptionCode")
 
         results.append(
             GmgDeal(
@@ -306,9 +308,36 @@ def parse_deals(
                 image_url=item.get("ImageUrl") or "",
                 promo_code=promo_code or None,
                 promo_description=promo_description,
+                promo_is_platform_wide=is_platform_wide,
             )
         )
     return results
+
+
+def promotion_from_deal(deal: "GmgDeal") -> "Promotion | None":
+    """Converte o cupom solto (promo_code/promo_description) da GmgDeal para
+    o modelo unificado do promotion_engine, pra passar pelos mesmos filtros
+    de confianca (is_trustworthy) e pela mesma exibicao dos outros providers.
+
+    A API da GMG/impact.com nao expoe valor de desconto do cupom nesse
+    endpoint (so o codigo e o titulo da promocao) - o desconto real ja vem
+    embutido no preco do catalogo. Por isso a Promotion criada aqui nao tem
+    discount_amount/discount_percent: ela existe so pra exibir o codigo de
+    forma confiavel, sem inventar um valor de economia que a API nao informa.
+    """
+    from promotion_engine import Promotion, SCOPE_PLATFORM, SCOPE_PRODUCT
+
+    if not deal.promo_code:
+        return None
+    return Promotion(
+        source="gmg",
+        kind="coupon",
+        code=deal.promo_code,
+        description=deal.promo_description or "",
+        scope=SCOPE_PLATFORM if deal.promo_is_platform_wide else SCOPE_PRODUCT,
+        product_ids=[deal.item_id] if not deal.promo_is_platform_wide else [],
+        confidence="api",
+    )
 
 
 if __name__ == "__main__":

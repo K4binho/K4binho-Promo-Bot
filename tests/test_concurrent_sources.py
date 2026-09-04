@@ -66,7 +66,7 @@ def test_source_registry_contains_all_integrations():
     cfg = Mock()
     tasks = bot.build_source_tasks(cfg, {}, {}, {}, {}, False)
     assert [task.name for task in tasks] == [
-        "Mercado Livre", "Steam", "GMG", "AliExpress", "Nuuvem"
+        "Mercado Livre", "Steam", "GMG", "AliExpress", "Nuuvem", "Shopee", "Kabum"
     ]
 
 
@@ -95,7 +95,7 @@ def test_send_message_uses_central_rate_limiter():
     response = Mock()
     response.raise_for_status.return_value = None
     with patch.object(telegram._rate_limiter, "wait") as wait, patch.object(
-        telegram.httpx, "post", return_value=response
+        telegram._client, "post", return_value=response
     ):
         telegram.send_message("token", "-1001", "oferta")
 

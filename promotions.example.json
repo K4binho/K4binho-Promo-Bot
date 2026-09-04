@@ -58,6 +58,16 @@
       "confidence": "manual"
     }
   ],
+  "gmg": [
+    {
+      "enabled": false,
+      "kind": "coupon",
+      "code": "GMGLOJA5",
+      "scope": "platform",
+      "description": "Exemplo de cupom manual de plataforma para GMG, complementar ao cupom embutido do catalogo",
+      "confidence": "manual"
+    }
+  ],
   "campaigns": [
     {
       "id": "aliexpress-evento-exemplo",

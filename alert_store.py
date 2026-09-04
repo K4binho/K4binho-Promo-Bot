@@ -1,11 +1,17 @@
 import json
 import logging
+import threading
 import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
 
 STORE_PATH = Path(__file__).parent / "alerts.json"
 COOLDOWN_HOURS = 24
+
+# Uma unica lock pro dict de alertas e pro arquivo. O listener (thread de
+# comandos) e as fontes (threads do ciclo) mexem no mesmo objeto, entao a lock
+# tem que morar aqui: cada modulo com a sua deixava os writes intercalarem.
+LOCK = threading.RLock()
 
 log = logging.getLogger("k4binho")
 

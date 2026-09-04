@@ -14,6 +14,8 @@ import httpx
 import alert_store
 import analytics
 import aliexpress
+import link_validation
+import shopee
 import bot_commands
 import click_server
 import click_tracker
@@ -24,6 +26,7 @@ import ml_playwright
 import ml_scraper
 import ml_signals
 import gmg_cj
+import kabum
 import nuuvem
 import price_history
 import promotion_engine
@@ -38,7 +41,7 @@ log = logging.getLogger("k4binho")
 _lock_socket: socket.socket | None = None
 _ml_session_alert_sent: bool = False
 _click_links_lock = threading.RLock()
-_alerts_lock = threading.RLock()
+_alerts_lock = alert_store.LOCK
 _plus_candidates_lock = threading.RLock()
 
 
@@ -168,6 +171,94 @@ _click_links: dict[str, dict] = {}
 _plus_candidates: list[tuple[float, str, str, str, object, object]] = []
 
 
+def _persist_state(seen: dict[str, str], published_deals: dict[str, dict]) -> None:
+    """Salva seen.json e deal_store.json logo apos cada publicacao.
+
+    Antes isso so acontecia uma vez no fim do ciclo inteiro (depois que as
+    7 fontes concorrentes terminavam). Se o processo reiniciasse no meio do
+    ciclo, tudo que ja tinha sido postado mas ainda nao persistido virava
+    "novo" de novo no proximo ciclo -- foi assim que "The Escapists 2 -
+    Season Pass" saiu duplicado (19:20:06 e 19:41:53, com restart no meio).
+    Chamar isso a cada post fecha essa janela: o pior caso agora e perder
+    so o post mais recente, nao o ciclo inteiro.
+    """
+    try:
+        save_seen(seen)
+        ds.save_deals(published_deals)
+    except OSError as exc:
+        log.error("[Persist] falha ao salvar estado: %s", exc)
+
+
+def _resolve_repost(
+    published_deals: dict[str, dict],
+    seen: dict[str, str],
+    key: str,
+    price: float,
+    *,
+    title: str = "",
+    url: str = "",
+    prefix: str = "",
+    promotion_signature: str = "",
+    min_drop_percent: float = 10.0,
+    min_drop_amount: float = 20.0,
+    min_repost_days: int | None = None,
+) -> tuple[bool, str, str | None]:
+    """Decide o que fazer com um item candidato a publicacao.
+
+    Retorna (is_new, reason, record_key):
+      - is_new=True, reason="", record_key=key -> nunca publicado, publicar normal.
+      - is_new=False, reason="<motivo>", record_key=<id> -> ja publicado (ou e
+        o mesmo produto relistado com outro id, achado por titulo/URL), mas
+        as condicoes de republicacao (queda de preco, novo cupom, menor preco
+        historico, periodo configurado) foram satisfeitas -> publicar de novo
+        registrando o motivo.
+      - is_new=False, reason="", record_key=None -> ja publicado e nao ha
+        motivo pra republicar agora -> pular.
+    """
+    if key in published_deals:
+        # Ja publicamos esse id antes. Cada ciclo apaga de `seen` os itens que
+        # sairam da lista de promo da loja, entao "key not in seen" NAO quer
+        # dizer inedito -- sem esse ramo o item volta como novo toda vez que
+        # entra e sai da promo, e o canal enche de repeticao.
+        target = key
+    elif key not in seen:
+        dup_id = ds.find_duplicate_id(published_deals, key, title=title, url=url, prefix=prefix)
+        if dup_id is None:
+            return True, "", key
+        target = dup_id
+    else:
+        target = key
+
+    should, reason, _prev = ds.should_republish(
+        published_deals, target, price,
+        promotion_signature=promotion_signature,
+        min_drop_percent=min_drop_percent,
+        min_drop_amount=min_drop_amount,
+        min_repost_days=min_repost_days,
+    )
+    if should:
+        return False, reason, target
+    return False, "", None
+
+
+def _delete_previous_post(cfg: Config, published_deals: dict[str, dict], record_key: str) -> None:
+    """Apaga o post anterior desse item antes de republicar.
+
+    Sem isso o canal acumula varias mensagens do mesmo produto. So funciona
+    para posts de ate 48h (limite da Bot API) e para itens publicados depois
+    que passamos a guardar message_id.
+    """
+    entry = published_deals.get(record_key) or {}
+    message_id = entry.get("message_id")
+    if not message_id:
+        return
+    ok = telegram.delete_message(cfg.telegram_bot_token, cfg.telegram_channel_id, message_id)
+    if ok:
+        log.info("[dedup] post anterior apagado: %s (msg %s)", record_key, message_id)
+    else:
+        log.info("[dedup] nao deu pra apagar o post anterior de %s (msg %s)", record_key, message_id)
+
+
 def _wrap_link(cfg: Config, deal_id: str, destination: str, source: str, title: str) -> str:
     if not cfg.click_tracking_enabled:
         return destination
@@ -191,26 +282,8 @@ def _add_plus_candidate(candidate: dict) -> None:
         _plus_candidates.append(candidate)
 
 
-def _promotion_signature(promo: promotion_engine.Promotion) -> tuple:
-    return (
-        promo.source, promo.kind, promo.code, promo.discount_amount,
-        promo.discount_percent, promo.minimum_spend, promo.max_discount,
-        promo.selected_users_only, promo.app_only, promo.requires_coins,
-        promo.rescue_url,
-    )
-
-
 def _merge_promotions(*groups) -> list[promotion_engine.Promotion]:
-    merged: list[promotion_engine.Promotion] = []
-    seen_keys: set[tuple] = set()
-    for group in groups:
-        for promo in group or []:
-            key = _promotion_signature(promo)
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            merged.append(promo)
-    return merged
+    return promotion_engine.merge_promotions(*groups)
 
 
 def _ml_scan_priority(deal, best_sellers: set[str], trends: list[str]) -> float:
@@ -280,7 +353,7 @@ def _ml_promotions_for_deals(cfg: Config, deals: list, best_sellers: set[str], t
 
 def run_cycle(
     cfg: Config,
-    seen: set[str],
+    seen: dict[str, str],
     history: dict[str, list[list[str | int]]],
     published_deals: dict[str, dict],
     alerts: dict[str, list[dict]],
@@ -501,6 +574,11 @@ def run_cycle(
         if not link:
             log.warning("[ML] sem short_url para %s", deal.item_id)
             continue
+        if link_validation.link_is_broken(link):
+            log.warning("[ML] link quebrado (404/410), pulando: %s", deal.title[:50])
+            continue
+        if image and not link_validation.image_is_reachable(image):
+            image = None
         link = _wrap_link(cfg, deal.item_id, link, "ml", deal.title)
         effective_price = promo_eval.scoring_price
 
@@ -531,8 +609,10 @@ def run_cycle(
                 promotion=promo_eval,
             )
             action = "published"
+        if drop_prev is not None:
+            _delete_previous_post(cfg, published_deals, deal.item_id)
         try:
-            telegram.send_message(
+            message_id = telegram.send_message(
                 cfg.telegram_bot_token,
                 cfg.telegram_channel_id,
                 text,
@@ -544,7 +624,14 @@ def run_cycle(
             continue
 
         mark_seen(seen, deal.item_id)
-        ds.record_published(published_deals, deal.item_id, effective_price, promotion_signature=promotion_engine.promotion_fingerprint(promo_eval.best_guaranteed))
+        ds.record_published(
+            published_deals, deal.item_id, effective_price,
+            promotion_signature=promotion_engine.promotion_fingerprint(promo_eval.best_guaranteed),
+            title=deal.title, url=deal.permalink,
+            message_id=message_id, thread_id=cfg.telegram_thread_id,
+            reason=action,
+        )
+        _persist_state(seen, published_deals)
         posted += 1
         display_promo = promo_eval.display_promotion
         analytics.record_deal(
@@ -598,7 +685,7 @@ def run_cycle(
     return posted
 
 
-def run_steam_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]], dry_run: bool) -> int:
+def run_steam_cycle(cfg: Config, seen: dict[str, str], published_deals: dict[str, dict], alerts: dict[str, list[dict]], dry_run: bool) -> int:
     try:
         games = steam.fetch_specials(cfg.itad_api_key, bundle_scan_apps=cfg.steam_bundle_scan_apps)
     except (RuntimeError, httpx.HTTPError) as exc:
@@ -612,12 +699,26 @@ def run_steam_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]], 
     if stale:
         log.info("[Steam] %d jogo(s) saiu(ram) de promo, liberado(s) pra re-post.", len(stale))
 
-    candidates = [
-        g
-        for g in games
-        if g.discount_percent >= cfg.steam_min_discount_percent
-        and f"steam:{g.game_id}" not in seen
-    ]
+    candidates = []
+    steam_repost_reasons: dict[str, str] = {}
+    steam_repost_keys: dict[str, str] = {}
+    for g in games:
+        if g.discount_percent < cfg.steam_min_discount_percent:
+            continue
+        key = f"steam:{g.game_id}"
+        is_new, reason, record_key = _resolve_repost(
+            published_deals, seen, key, g.price,
+            title=g.title, url=g.permalink, prefix="steam:",
+            min_drop_percent=getattr(cfg, "repost_min_drop_percent", 10.0),
+            min_drop_amount=getattr(cfg, "repost_min_drop_amount", 20.0),
+            min_repost_days=getattr(cfg, "repost_min_days", None),
+        )
+        if is_new:
+            candidates.append(g)
+        elif record_key:
+            candidates.append(g)
+            steam_repost_reasons[key] = reason
+            steam_repost_keys[key] = record_key
     candidates.sort(key=lambda g: g.discount_percent, reverse=True)
     to_enrich = candidates[:60]
     steam.enrich(cfg.itad_api_key, to_enrich)
@@ -719,8 +820,13 @@ def run_steam_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]], 
             link=game_link,
             lowest_price=game.lowest_price,
         )
+        steam_key = f"steam:{game.game_id}"
+        steam_reason = steam_repost_reasons.get(steam_key, "")
+        steam_record_key = steam_repost_keys.get(steam_key, steam_key)
+        if steam_reason:
+            _delete_previous_post(cfg, published_deals, steam_record_key)
         try:
-            telegram.send_message(
+            message_id = telegram.send_message(
                 cfg.telegram_bot_token,
                 cfg.telegram_channel_id,
                 text,
@@ -731,8 +837,15 @@ def run_steam_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]], 
             log.error("[Steam] envio '%s': %s", game.game_id, exc)
             continue
 
-        mark_seen(seen, f"steam:{game.game_id}")
+        mark_seen(seen, steam_key)
         posted += 1
+        ds.record_published(
+            published_deals, steam_record_key, game.price,
+            title=game.title, url=game.permalink,
+            message_id=message_id, thread_id=cfg.telegram_steam_thread_id,
+            reason=steam_reason or "published",
+        )
+        _persist_state(seen, published_deals)
         analytics.record_deal(
             source="steam",
             product_id=game.game_id,
@@ -749,9 +862,12 @@ def run_steam_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]], 
             category="games",
             deal_type="plus",
             affiliate=False,
-            action="published",
+            action="published" if not steam_reason else f"republished:{steam_reason}",
         )
-        log.info("[Steam] postado: %d%% off | %s", game.discount_percent, game.title[:50])
+        if steam_reason:
+            log.info("[Steam][republicado: %s] %s", steam_reason, game.title[:50])
+        else:
+            log.info("[Steam] postado: %d%% off | %s", game.discount_percent, game.title[:50])
         _check_alerts(cfg, alerts, game.title, game.price, "steam", game.permalink)
         if posted < len(selected):
             time.sleep(7)
@@ -759,7 +875,7 @@ def run_steam_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]], 
     return posted
 
 
-def run_gmg_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]], dry_run: bool) -> int:
+def run_gmg_cycle(cfg: Config, seen: dict[str, str], published_deals: dict[str, dict], alerts: dict[str, list[dict]], dry_run: bool) -> int:
     if not (cfg.cj_account_sid and cfg.cj_auth_token):
         # Sem credenciais impact.com, pula a integracao silenciosamente.
         return 0
@@ -787,6 +903,23 @@ def run_gmg_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]], dr
 
     games = gmg_cj.parse_deals(catalog_items, promo_codes)
 
+    # Padroniza o cupom solto (promo_code/promo_description) pelo motor de
+    # cupons: aplica is_trustworthy (rejeita codigo de layout/falso-positivo)
+    # e permite cupom manual de loja/plataforma vindo de promotions.json
+    # (escopo "gmg") complementar ou substituir o cupom embutido do catalogo.
+    catalog = promotion_engine.load_catalog(getattr(cfg, "promotions_file", "promotions.json"))
+    for g in games:
+        embedded = gmg_cj.promotion_from_deal(g)
+        catalog_promos = promotion_engine.promotions_for_item(
+            catalog, "gmg", g.title, g.price, product_id=g.item_id
+        )
+        merged = promotion_engine.merge_promotions(
+            [embedded] if embedded else [], catalog_promos
+        )
+        best = merged[0] if merged else None
+        g.promo_code = best.code if best else None
+        g.promo_description = best.description if best else None
+
     current_ids = {f"gmg:{g.item_id}" for g in games if g.discount_percent > 0}
     stale = [s for s in seen if s.startswith("gmg:") and s not in current_ids]
     for s in stale:
@@ -794,10 +927,30 @@ def run_gmg_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]], dr
     if stale:
         log.info("[GMG] %d jogo(s) saiu(ram) de promo, liberado(s) pra re-post.", len(stale))
 
-    unseen_discounted = [
-        g for g in games
-        if g.discount_percent > 0 and f"gmg:{g.item_id}" not in seen
-    ]
+    gmg_repost_reasons: dict[str, str] = {}
+    gmg_repost_keys: dict[str, str] = {}
+    unseen_discounted = []
+    for g in games:
+        if g.discount_percent <= 0:
+            continue
+        key = f"gmg:{g.item_id}"
+        # Sem url= de proposito: o catalogo da impact.com devolve a MESMA url de
+        # tracking generica pra todo item, entao usa-la como sinal de dedup
+        # colapsa todos os jogos da GMG numa unica entrada. Titulo basta.
+        is_new, reason, record_key = _resolve_repost(
+            published_deals, seen, key, g.price,
+            title=g.title, prefix="gmg:",
+            promotion_signature=g.promo_code or "",
+            min_drop_percent=getattr(cfg, "repost_min_drop_percent", 10.0),
+            min_drop_amount=getattr(cfg, "repost_min_drop_amount", 20.0),
+            min_repost_days=getattr(cfg, "repost_min_days", None),
+        )
+        if is_new:
+            unseen_discounted.append(g)
+        elif record_key:
+            unseen_discounted.append(g)
+            gmg_repost_reasons[key] = reason
+            gmg_repost_keys[key] = record_key
     candidates = [g for g in unseen_discounted if g.discount_percent >= cfg.gmg_min_discount_percent]
     candidates.sort(key=lambda g: g.discount_percent, reverse=True)
 
@@ -845,6 +998,12 @@ def run_gmg_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]], dr
         if not link:
             log.warning("[GMG] sem link para %s", game.item_id)
             continue
+        if link_validation.link_is_broken(link):
+            log.warning("[GMG] link quebrado (404/410), pulando: %s", game.title[:50])
+            continue
+        image_url = game.image_url or None
+        if image_url and not link_validation.image_is_reachable(image_url):
+            image_url = None
         link = _wrap_link(cfg, f"gmg:{game.item_id}", link, "gmg", game.title)
         text = telegram.format_gmg_deal(
             title=game.title,
@@ -855,20 +1014,33 @@ def run_gmg_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]], dr
             promo_code=game.promo_code,
             promo_description=game.promo_description,
         )
+        gmg_key = f"gmg:{game.item_id}"
+        gmg_reason = gmg_repost_reasons.get(gmg_key, "")
+        gmg_record_key = gmg_repost_keys.get(gmg_key, gmg_key)
+        if gmg_reason:
+            _delete_previous_post(cfg, published_deals, gmg_record_key)
         try:
-            telegram.send_message(
+            message_id = telegram.send_message(
                 cfg.telegram_bot_token,
                 cfg.telegram_channel_id,
                 text,
                 thread_id=cfg.telegram_gmg_thread_id,
-                image_url=game.image_url or None,
+                image_url=image_url,
             )
         except httpx.HTTPError as exc:
             log.error("[GMG] envio '%s': %s", game.item_id, exc)
             continue
 
-        mark_seen(seen, f"gmg:{game.item_id}")
+        mark_seen(seen, gmg_key)
         posted += 1
+        ds.record_published(
+            published_deals, gmg_record_key, game.price,
+            title=game.title,
+            promotion_signature=game.promo_code or "",
+            message_id=message_id, thread_id=cfg.telegram_gmg_thread_id,
+            reason=gmg_reason or "published",
+        )
+        _persist_state(seen, published_deals)
         analytics.record_deal(
             source="gmg",
             product_id=game.item_id,
@@ -885,9 +1057,12 @@ def run_gmg_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]], dr
             category="games",
             deal_type="plus",
             affiliate=True,
-            action="published",
+            action="published" if not gmg_reason else f"republished:{gmg_reason}",
         )
-        log.info("[GMG] postado: %s%% off | %s", game.discount_percent, game.title[:50])
+        if gmg_reason:
+            log.info("[GMG][republicado: %s] %s", gmg_reason, game.title[:50])
+        else:
+            log.info("[GMG] postado: %s%% off | %s", game.discount_percent, game.title[:50])
         _check_alerts(cfg, alerts, game.title, game.price, "gmg", link)
         if posted < len(selected):
             time.sleep(7)
@@ -895,7 +1070,7 @@ def run_gmg_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]], dr
     return posted
 
 
-def run_aliexpress_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]], dry_run: bool) -> int:
+def run_aliexpress_cycle(cfg: Config, seen: dict[str, str], published_deals: dict[str, dict], alerts: dict[str, list[dict]], dry_run: bool) -> int:
     if not (cfg.aliexpress_app_key and cfg.aliexpress_app_secret):
         return 0
 
@@ -927,19 +1102,33 @@ def run_aliexpress_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dic
     if stale:
         log.info("[Ali] %d produto(s) saiu(ram) de promo, liberado(s) pra re-post.", len(stale))
 
-    candidates = [
-        d
-        for d in deals
-        if d.discount_percent >= cfg.aliexpress_min_discount_percent
-        and f"ali:{d.product_id}" not in seen
-    ]
+    candidates = []
+    repost_reasons: dict[str, str] = {}
+    repost_keys: dict[str, str] = {}
+    for d in deals:
+        if d.discount_percent < cfg.aliexpress_min_discount_percent:
+            continue
+        key = f"ali:{d.product_id}"
+        is_new, reason, record_key = _resolve_repost(
+            published_deals, seen, key, d.price,
+            title=d.title, url=d.permalink, prefix="ali:",
+            min_drop_percent=getattr(cfg, "repost_min_drop_percent", 10.0),
+            min_drop_amount=getattr(cfg, "repost_min_drop_amount", 20.0),
+            min_repost_days=getattr(cfg, "repost_min_days", None),
+        )
+        if is_new:
+            candidates.append(d)
+        elif record_key:
+            candidates.append(d)
+            repost_reasons[key] = reason
+            repost_keys[key] = record_key
 
     deduped: dict[str, aliexpress.AliDeal] = {}
     for d in candidates:
-        key = scoring._normalize(d.title)[:60]
-        existing = deduped.get(key)
+        dedup_key = scoring._normalize(d.title)[:60]
+        existing = deduped.get(dedup_key)
         if existing is None or d.price < existing.price:
-            deduped[key] = d
+            deduped[dedup_key] = d
     candidates = list(deduped.values())
 
     catalog = promotion_engine.load_catalog(cfg.promotions_file)
@@ -1000,6 +1189,12 @@ def run_aliexpress_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dic
 
     posted = 0
     for _score_val, deal, _ali_result, _ali_cat, promo_eval in selected:
+        if link_validation.link_is_broken(deal.permalink):
+            log.warning("[Ali] link quebrado (404/410), pulando: %s", deal.title[:50])
+            continue
+        ali_image = deal.image_url or None
+        if ali_image and not link_validation.image_is_reachable(ali_image):
+            ali_image = None
         ali_link = _wrap_link(
             cfg, f"ali:{deal.product_id}", deal.permalink, "aliexpress", deal.title
         )
@@ -1013,22 +1208,34 @@ def run_aliexpress_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dic
             sales_count=deal.sales_count,
             promotion=promo_eval,
         )
+        ali_key = f"ali:{deal.product_id}"
+        repost_reason = repost_reasons.get(ali_key, "")
+        record_key = repost_keys.get(ali_key, ali_key)
+        if repost_reason:
+            _delete_previous_post(cfg, published_deals, record_key)
         try:
-            telegram.send_message(
+            message_id = telegram.send_message(
                 cfg.telegram_bot_token,
                 cfg.telegram_channel_id,
                 text,
-                thread_id=cfg.telegram_aliexpress_thread_id,
-                image_url=deal.image_url or None,
+                thread_id=cfg.telegram_thread_id,
+                image_url=ali_image,
             )
         except httpx.HTTPError as exc:
             log.error("[Ali] envio '%s': %s", deal.product_id, exc)
             continue
 
-        mark_seen(seen, f"ali:{deal.product_id}")
+        mark_seen(seen, ali_key)
         posted += 1
         display_promo = promo_eval.display_promotion
         effective_price = promo_eval.scoring_price
+        ds.record_published(
+            published_deals, record_key, effective_price,
+            title=deal.title, url=deal.permalink,
+            message_id=message_id, thread_id=cfg.telegram_thread_id,
+            reason=repost_reason or "published",
+        )
+        _persist_state(seen, published_deals)
         analytics.record_deal(
             source="aliexpress",
             product_id=deal.product_id,
@@ -1050,12 +1257,14 @@ def run_aliexpress_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dic
             category=_ali_cat,
             deal_type="commercial",
             affiliate=True,
-            action="published",
+            action="published" if not repost_reason else f"republished:{repost_reason}",
             promotion_code=display_promo.code if display_promo else "",
             promotion_savings=promo_eval.guaranteed_savings,
             promotion_conditional=bool(display_promo and display_promo.conditional),
         )
-        if promo_eval.guaranteed_savings > 0:
+        if repost_reason:
+            log.info("[Ali][republicado: %s] %.2f -> %.2f | %s", repost_reason, deal.price, effective_price, deal.title[:50])
+        elif promo_eval.guaranteed_savings > 0:
             log.info(
                 "[Ali][cupom %s] postado: %.2f -> %.2f | %s",
                 display_promo.code if display_promo else "",
@@ -1070,7 +1279,400 @@ def run_aliexpress_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dic
     return posted
 
 
-def run_nuuvem_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]], dry_run: bool) -> int:
+def run_shopee_cycle(cfg: Config, seen: dict[str, str], published_deals: dict[str, dict], alerts: dict[str, list[dict]], dry_run: bool) -> int:
+    if not (cfg.shopee_app_id and cfg.shopee_app_secret):
+        return 0
+
+    try:
+        deals = shopee.fetch_deals(
+            cfg.shopee_app_id,
+            cfg.shopee_app_secret,
+            keywords=cfg.shopee_keywords,
+            page_size=20,
+        )
+    except (RuntimeError, httpx.HTTPError) as exc:
+        log.error("[Shopee] %s", exc)
+        return 0
+
+    current_ids = {f"shopee:{d.item_id}" for d in deals if d.discount_percent > 0}
+    stale = [s for s in seen if s.startswith("shopee:") and s not in current_ids]
+    for s in stale:
+        del seen[s]
+    if stale:
+        log.info("[Shopee] %d produto(s) saiu(ram) de promo, liberado(s) pra re-post.", len(stale))
+
+    candidates = []
+    repost_reasons: dict[str, str] = {}
+    repost_keys: dict[str, str] = {}
+    for d in deals:
+        if d.discount_percent < cfg.shopee_min_discount_percent:
+            continue
+        key = f"shopee:{d.item_id}"
+        is_new, reason, record_key = _resolve_repost(
+            published_deals, seen, key, d.price,
+            title=d.title, url=d.permalink, prefix="shopee:",
+            min_drop_percent=getattr(cfg, "repost_min_drop_percent", 10.0),
+            min_drop_amount=getattr(cfg, "repost_min_drop_amount", 20.0),
+            min_repost_days=getattr(cfg, "repost_min_days", None),
+        )
+        if is_new:
+            candidates.append(d)
+        elif record_key:
+            candidates.append(d)
+            repost_reasons[key] = reason
+            repost_keys[key] = record_key
+
+    deduped: dict[str, shopee.ShopeeDeal] = {}
+    for d in candidates:
+        dedup_key = scoring._normalize(d.title)[:60]
+        existing = deduped.get(dedup_key)
+        if existing is None or d.price < existing.price:
+            deduped[dedup_key] = d
+    candidates = list(deduped.values())
+
+    catalog = promotion_engine.load_catalog(cfg.promotions_file)
+    scored: list = []
+    promotion_count = 0
+    for d in candidates:
+        cat = scoring.category_match(d.title)
+        promos = promotion_engine.promotions_for_item(
+            catalog, "shopee", d.title, d.price,
+            store_id=d.store_id, category_ids=d.category_ids, product_id=d.item_id,
+        )
+        promo_eval = promotion_engine.evaluate_price(
+            d.price, promos, title=d.title, store_id=d.store_id,
+            category_ids=d.category_ids, product_id=d.item_id,
+        )
+        display_promo = promo_eval.display_promotion
+        if display_promo:
+            promotion_count += 1
+        r = scoring.score_shopee(
+            title=d.title,
+            price=d.price,
+            original_price=d.original_price,
+            discount_percent=d.discount_percent,
+            sales_count=d.sales_count,
+            commission_rate=d.commission_rate,
+            rating=d.rating,
+            effective_price=promo_eval.scoring_price,
+            promotion_savings=promo_eval.guaranteed_savings,
+            promotion_code=(
+                display_promo.code
+                if display_promo and promo_eval.best_guaranteed
+                else ""
+            ),
+        )
+        scored.append((r.total, d, r, cat, promo_eval))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    selected = scored[: cfg.shopee_max_posts_per_cycle]
+
+    log.info(
+        "[Shopee] Encontrados: %d | Candidatos: %d | Com promocao configurada: %d | Selecionados: %d",
+        len(deals), len(scored), promotion_count, len(selected),
+    )
+
+    if dry_run:
+        log.info(
+            "[Shopee][dry-run] %d oferta(s) aprovada(s) de %d com %d%%+ off.",
+            len(selected), len(scored), cfg.shopee_min_discount_percent,
+        )
+        for total, d, r, cat, promo_eval in scored:
+            promo = promo_eval.display_promotion
+            promo_text = ""
+            if promo_eval.guaranteed_savings > 0:
+                promo_text = f" | cupom {promo.code or '-'} -> R${promo_eval.scoring_price:.2f}"
+            elif promo:
+                promo_text = " | promo condicional"
+            log.info(
+                "  score %d | %d%% | %d vendas%s | %s",
+                total, d.discount_percent, d.sales_count, promo_text, d.title[:50],
+            )
+        return 0
+    if not selected:
+        return 0
+
+    posted = 0
+    for _score_val, deal, _result, _cat, promo_eval in selected:
+        link = shopee.ensure_affiliate_link(cfg.shopee_app_id, cfg.shopee_app_secret, deal)
+        if not link:
+            continue
+        if link_validation.link_is_broken(link):
+            log.warning("[Shopee] link quebrado (404/410), pulando: %s", deal.title[:50])
+            continue
+        shopee_link = _wrap_link(cfg, f"shopee:{deal.item_id}", link, "shopee", deal.title)
+        image_url = deal.image_url or None
+        if image_url and not link_validation.image_is_reachable(image_url):
+            image_url = None
+        effective_price = promo_eval.scoring_price
+        text = telegram.format_shopee_deal(
+            title=deal.title,
+            price=effective_price,
+            link=shopee_link,
+            original_price=deal.original_price or None,
+            discount=deal.discount_percent,
+            store=deal.store,
+            commission_rate=deal.commission_rate,
+            sales_count=deal.sales_count,
+            rating=deal.rating,
+            promotion=promo_eval,
+        )
+        shopee_key = f"shopee:{deal.item_id}"
+        repost_reason = repost_reasons.get(shopee_key, "")
+        record_key = repost_keys.get(shopee_key, shopee_key)
+        if repost_reason:
+            _delete_previous_post(cfg, published_deals, record_key)
+        try:
+            message_id = telegram.send_message(
+                cfg.telegram_bot_token,
+                cfg.telegram_channel_id,
+                text,
+                thread_id=cfg.telegram_thread_id,
+                image_url=image_url,
+            )
+        except httpx.HTTPError as exc:
+            log.error("[Shopee] envio '%s': %s", deal.item_id, exc)
+            continue
+
+        mark_seen(seen, shopee_key)
+        posted += 1
+        display_promo = promo_eval.display_promotion
+        effective_price = promo_eval.scoring_price
+        ds.record_published(
+            published_deals, record_key, effective_price,
+            title=deal.title, url=link,
+            message_id=message_id, thread_id=cfg.telegram_thread_id,
+            reason=repost_reason or "published",
+        )
+        _persist_state(seen, published_deals)
+        analytics.record_deal(
+            source="shopee",
+            product_id=deal.item_id,
+            title=deal.title,
+            price=effective_price,
+            listed_price=deal.price,
+            original_price=deal.original_price,
+            discount_percent=(
+                round((deal.original_price - effective_price) / deal.original_price * 100)
+                if deal.original_price and deal.original_price > effective_price
+                else deal.discount_percent
+            ),
+            quality_score=_result.quality,
+            conversion_score=_result.conversion,
+            retention_score=_result.retention,
+            confidence_score=_result.confidence,
+            final_score=_result.final,
+            history_confidence=_result.history_confidence,
+            category=_cat,
+            deal_type="commercial",
+            affiliate=True,
+            action="published" if not repost_reason else f"republished:{repost_reason}",
+            promotion_code=display_promo.code if display_promo else "",
+            promotion_savings=promo_eval.guaranteed_savings,
+            promotion_conditional=bool(display_promo and display_promo.conditional),
+        )
+        if repost_reason:
+            log.info("[Shopee][republicado: %s] %.2f -> %.2f | %s", repost_reason, deal.price, effective_price, deal.title[:50])
+        elif promo_eval.guaranteed_savings > 0:
+            log.info(
+                "[Shopee][cupom %s] postado: %.2f -> %.2f | %s",
+                display_promo.code if display_promo else "",
+                deal.price, effective_price, deal.title[:50],
+            )
+        else:
+            log.info("[Shopee] postado: %d%% off | %s", deal.discount_percent, deal.title[:50])
+        _check_alerts(cfg, alerts, deal.title, effective_price, "shopee", link)
+        if posted < len(selected):
+            time.sleep(7)
+
+    return posted
+
+
+def run_kabum_cycle(cfg: Config, seen: dict[str, str], published_deals: dict[str, dict], alerts: dict[str, list[dict]], dry_run: bool) -> int:
+    if not (cfg.kabum_awin_token and cfg.kabum_publisher_id):
+        return 0
+
+    try:
+        deals = kabum.scrape_deals(min_discount=cfg.kabum_min_discount_percent)
+    except Exception as exc:  # scraping é frágil por natureza (HTML muda sem aviso)
+        log.error("[Kabum] %s", exc)
+        return 0
+
+    current_ids = {f"kabum:{d.product_id}" for d in deals}
+    stale = [s for s in seen if s.startswith("kabum:") and s not in current_ids]
+    for s in stale:
+        del seen[s]
+    if stale:
+        log.info("[Kabum] %d produto(s) saiu(ram) de promo, liberado(s) pra re-post.", len(stale))
+
+    candidates = []
+    repost_reasons: dict[str, str] = {}
+    repost_keys: dict[str, str] = {}
+    for d in deals:
+        key = f"kabum:{d.product_id}"
+        is_new, reason, record_key = _resolve_repost(
+            published_deals, seen, key, d.price,
+            title=d.title, url=d.permalink, prefix="kabum:",
+            min_drop_percent=getattr(cfg, "repost_min_drop_percent", 10.0),
+            min_drop_amount=getattr(cfg, "repost_min_drop_amount", 20.0),
+            min_repost_days=getattr(cfg, "repost_min_days", None),
+        )
+        if is_new:
+            candidates.append(d)
+        elif record_key:
+            candidates.append(d)
+            repost_reasons[key] = reason
+            repost_keys[key] = record_key
+
+    deduped: dict[str, kabum.KabumDeal] = {}
+    for d in candidates:
+        dedup_key = scoring._normalize(d.title)[:60]
+        existing = deduped.get(dedup_key)
+        if existing is None or d.price < existing.price:
+            deduped[dedup_key] = d
+    candidates = list(deduped.values())
+
+    catalog = promotion_engine.load_catalog(cfg.promotions_file)
+    scored: list = []
+    promotion_count = 0
+    for d in candidates:
+        cat = scoring.category_match(d.title)
+        promos = promotion_engine.promotions_for_item(
+            catalog, "kabum", d.title, d.price, product_id=d.product_id,
+        )
+        promo_eval = promotion_engine.evaluate_price(
+            d.price, promos, title=d.title, product_id=d.product_id,
+        )
+        display_promo = promo_eval.display_promotion
+        if display_promo:
+            promotion_count += 1
+        r = scoring.score_kabum(
+            title=d.title,
+            price=d.price,
+            original_price=d.original_price,
+            discount_percent=d.discount_percent,
+            effective_price=promo_eval.scoring_price,
+            promotion_savings=promo_eval.guaranteed_savings,
+            promotion_code=(
+                display_promo.code
+                if display_promo and promo_eval.best_guaranteed
+                else ""
+            ),
+        )
+        scored.append((r.total, d, r, cat, promo_eval))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    selected = scored[: cfg.kabum_max_posts_per_cycle]
+
+    log.info(
+        "[Kabum] Encontrados: %d | Candidatos: %d | Com promocao configurada: %d | Selecionados: %d",
+        len(deals), len(scored), promotion_count, len(selected),
+    )
+
+    if dry_run:
+        log.info(
+            "[Kabum][dry-run] %d oferta(s) aprovada(s) de %d com %d%%+ off.",
+            len(selected), len(scored), cfg.kabum_min_discount_percent,
+        )
+        for total, d, r, cat, promo_eval in scored:
+            log.info(
+                "  score %d | %d%% | %s",
+                total, d.discount_percent, d.title[:50],
+            )
+        return 0
+    if not selected:
+        return 0
+
+    posted = 0
+    for _score_val, deal, _result, _cat, promo_eval in selected:
+        link = kabum.ensure_affiliate_link(cfg.kabum_awin_token, cfg.kabum_publisher_id, deal)
+        if not link:
+            continue
+        if link_validation.link_is_broken(link):
+            log.warning("[Kabum] link quebrado (404/410), pulando: %s", deal.title[:50])
+            continue
+        kabum_link = _wrap_link(cfg, f"kabum:{deal.product_id}", link, "kabum", deal.title)
+        image_url = deal.image_url or None
+        if image_url and not link_validation.image_is_reachable(image_url):
+            image_url = None
+        effective_price = promo_eval.scoring_price
+        text = telegram.format_kabum_deal(
+            title=deal.title,
+            price=effective_price,
+            link=kabum_link,
+            original_price=deal.original_price or None,
+            discount=deal.discount_percent,
+            promotion=promo_eval,
+        )
+        kabum_key = f"kabum:{deal.product_id}"
+        repost_reason = repost_reasons.get(kabum_key, "")
+        record_key = repost_keys.get(kabum_key, kabum_key)
+        if repost_reason:
+            _delete_previous_post(cfg, published_deals, record_key)
+        try:
+            message_id = telegram.send_message(
+                cfg.telegram_bot_token,
+                cfg.telegram_channel_id,
+                text,
+                thread_id=cfg.telegram_thread_id,
+                image_url=image_url,
+            )
+        except httpx.HTTPError as exc:
+            log.error("[Kabum] envio '%s': %s", deal.product_id, exc)
+            continue
+
+        mark_seen(seen, kabum_key)
+        posted += 1
+        display_promo = promo_eval.display_promotion
+        ds.record_published(
+            published_deals, record_key, effective_price,
+            title=deal.title, url=link,
+            message_id=message_id, thread_id=cfg.telegram_thread_id,
+            reason=repost_reason or "published",
+        )
+        _persist_state(seen, published_deals)
+        analytics.record_deal(
+            source="kabum",
+            product_id=deal.product_id,
+            title=deal.title,
+            price=effective_price,
+            listed_price=deal.price,
+            original_price=deal.original_price,
+            discount_percent=(
+                round((deal.original_price - effective_price) / deal.original_price * 100)
+                if deal.original_price and deal.original_price > effective_price
+                else deal.discount_percent
+            ),
+            quality_score=_result.quality,
+            conversion_score=_result.conversion,
+            retention_score=_result.retention,
+            confidence_score=_result.confidence,
+            final_score=_result.final,
+            history_confidence=_result.history_confidence,
+            category=_cat,
+            deal_type="commercial",
+            affiliate=True,
+            action="published" if not repost_reason else f"republished:{repost_reason}",
+            promotion_code=display_promo.code if display_promo else "",
+            promotion_savings=promo_eval.guaranteed_savings,
+            promotion_conditional=bool(display_promo and display_promo.conditional),
+        )
+        if repost_reason:
+            log.info("[Kabum][republicado: %s] %.2f -> %.2f | %s", repost_reason, deal.price, effective_price, deal.title[:50])
+        elif promo_eval.guaranteed_savings > 0:
+            log.info(
+                "[Kabum][cupom %s] postado: %.2f -> %.2f | %s",
+                display_promo.code if display_promo else "",
+                deal.price, effective_price, deal.title[:50],
+            )
+        else:
+            log.info("[Kabum] postado: %d%% off | %s", deal.discount_percent, deal.title[:50])
+        _check_alerts(cfg, alerts, deal.title, effective_price, "kabum", link)
+        if posted < len(selected):
+            time.sleep(7)
+
+    return posted
+
+
+def run_nuuvem_cycle(cfg: Config, seen: dict[str, str], published_deals: dict[str, dict], alerts: dict[str, list[dict]], dry_run: bool) -> int:
     if not cfg.itad_api_key:
         return 0
     try:
@@ -1086,12 +1688,27 @@ def run_nuuvem_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]],
     if stale:
         log.info("[Nuuvem] %d jogo(s) saiu(ram) de promo, liberado(s) pra re-post.", len(stale))
 
-    candidates = [
-        d
-        for d in deals
-        if d.discount_percent >= cfg.nuuvem_min_discount_percent
-        and f"nuuvem:{d.game_id}" not in seen
-    ]
+    nuuvem_repost_reasons: dict[str, str] = {}
+    nuuvem_repost_keys: dict[str, str] = {}
+    candidates = []
+    for d in deals:
+        if d.discount_percent < cfg.nuuvem_min_discount_percent:
+            continue
+        key = f"nuuvem:{d.game_id}"
+        is_new, reason, record_key = _resolve_repost(
+            published_deals, seen, key, d.price,
+            title=d.title, url=d.permalink, prefix="nuuvem:",
+            promotion_signature=d.coupon.code if d.coupon else "",
+            min_drop_percent=getattr(cfg, "repost_min_drop_percent", 10.0),
+            min_drop_amount=getattr(cfg, "repost_min_drop_amount", 20.0),
+            min_repost_days=getattr(cfg, "repost_min_days", None),
+        )
+        if is_new:
+            candidates.append(d)
+        elif record_key:
+            candidates.append(d)
+            nuuvem_repost_reasons[key] = reason
+            nuuvem_repost_keys[key] = record_key
 
     candidates.sort(key=lambda d: d.discount_percent, reverse=True)
     to_enrich = candidates[:60]
@@ -1146,6 +1763,14 @@ def run_nuuvem_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]],
     posted = 0
     for _score_val, deal, _result in selected:
         nuuvem_link = _wrap_link(cfg, f"nuuvem:{deal.game_id}", deal.permalink, "nuuvem", deal.title)
+        coupon_discount = None
+        if deal.coupon:
+            coupon_discount = deal.coupon.discount
+            if not deal.coupon.game:
+                # Cupom de plataforma (campanha), nao especifico deste
+                # jogo: a Nuuvem so garante "produtos selecionados", entao
+                # deixa a ressalva explicita na mensagem.
+                coupon_discount = f"{coupon_discount} — produtos selecionados, pode não valer aqui"
         text = telegram.format_nuuvem_deal(
             title=deal.title,
             price=deal.price,
@@ -1154,10 +1779,15 @@ def run_nuuvem_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]],
             link=nuuvem_link,
             lowest_price=deal.lowest_price,
             coupon_code=deal.coupon.code if deal.coupon else None,
-            coupon_discount=deal.coupon.discount if deal.coupon else None,
+            coupon_discount=coupon_discount,
         )
+        nuuvem_key = f"nuuvem:{deal.game_id}"
+        nuuvem_reason = nuuvem_repost_reasons.get(nuuvem_key, "")
+        nuuvem_record_key = nuuvem_repost_keys.get(nuuvem_key, nuuvem_key)
+        if nuuvem_reason:
+            _delete_previous_post(cfg, published_deals, nuuvem_record_key)
         try:
-            telegram.send_message(
+            message_id = telegram.send_message(
                 cfg.telegram_bot_token,
                 cfg.telegram_channel_id,
                 text,
@@ -1168,8 +1798,16 @@ def run_nuuvem_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]],
             log.error("[Nuuvem] envio '%s': %s", deal.game_id, exc)
             continue
 
-        mark_seen(seen, f"nuuvem:{deal.game_id}")
+        mark_seen(seen, nuuvem_key)
         posted += 1
+        ds.record_published(
+            published_deals, nuuvem_record_key, deal.price,
+            title=deal.title, url=deal.permalink,
+            promotion_signature=deal.coupon.code if deal.coupon else "",
+            message_id=message_id, thread_id=cfg.telegram_nuuvem_thread_id,
+            reason=nuuvem_reason or "published",
+        )
+        _persist_state(seen, published_deals)
         analytics.record_deal(
             source="nuuvem",
             product_id=deal.game_id,
@@ -1186,9 +1824,12 @@ def run_nuuvem_cycle(cfg: Config, seen: set[str], alerts: dict[str, list[dict]],
             category="games",
             deal_type="plus",
             affiliate=False,
-            action="published",
+            action="published" if not nuuvem_reason else f"republished:{nuuvem_reason}",
         )
-        log.info("[Nuuvem] postado: %d%% off | %s", deal.discount_percent, deal.title[:50])
+        if nuuvem_reason:
+            log.info("[Nuuvem][republicado: %s] %s", nuuvem_reason, deal.title[:50])
+        else:
+            log.info("[Nuuvem] postado: %d%% off | %s", deal.discount_percent, deal.title[:50])
         _check_alerts(cfg, alerts, deal.title, deal.price, "nuuvem", deal.permalink)
         if posted < len(selected):
             time.sleep(7)
@@ -1295,6 +1936,10 @@ def run_plus_fallback(cfg: Config, seen: dict[str, str], alerts: dict[str, list[
         return 0
 
     mark_seen(seen, candidate["seen_key"])
+    try:
+        save_seen(seen)
+    except OSError as exc:
+        log.error("[Persist] falha ao salvar estado: %s", exc)
     result = candidate["result"]
     analytics.record_deal(
         source=source,
@@ -1323,14 +1968,14 @@ def run_plus_fallback(cfg: Config, seen: dict[str, str], alerts: dict[str, list[
 
 def _campaign_thread_id(cfg: Config, source: str) -> int | None:
     source = source.lower()
-    if source == "aliexpress":
-        return cfg.telegram_aliexpress_thread_id
     if source == "steam":
         return cfg.telegram_steam_thread_id
     if source == "nuuvem":
         return cfg.telegram_nuuvem_thread_id
     if source == "gmg":
         return cfg.telegram_gmg_thread_id
+    # aliexpress, shopee, kabum e mercado livre vao todos para o mesmo
+    # topico "Ofertas do Dia" - nao fragmentar por loja.
     return cfg.telegram_thread_id
 
 
@@ -1489,13 +2134,15 @@ def build_source_tasks(
             "Mercado Livre",
             partial(run_cycle, cfg, seen, history, published_deals, alerts, dry_run),
         ),
-        SourceTask("Steam", partial(run_steam_cycle, cfg, seen, alerts, dry_run)),
-        SourceTask("GMG", partial(run_gmg_cycle, cfg, seen, alerts, dry_run)),
+        SourceTask("Steam", partial(run_steam_cycle, cfg, seen, published_deals, alerts, dry_run)),
+        SourceTask("GMG", partial(run_gmg_cycle, cfg, seen, published_deals, alerts, dry_run)),
         SourceTask(
             "AliExpress",
-            partial(run_aliexpress_cycle, cfg, seen, alerts, dry_run),
+            partial(run_aliexpress_cycle, cfg, seen, published_deals, alerts, dry_run),
         ),
-        SourceTask("Nuuvem", partial(run_nuuvem_cycle, cfg, seen, alerts, dry_run)),
+        SourceTask("Nuuvem", partial(run_nuuvem_cycle, cfg, seen, published_deals, alerts, dry_run)),
+        SourceTask("Shopee", partial(run_shopee_cycle, cfg, seen, published_deals, alerts, dry_run)),
+        SourceTask("Kabum", partial(run_kabum_cycle, cfg, seen, published_deals, alerts, dry_run)),
     ]
 
 
@@ -1527,7 +2174,7 @@ def main() -> None:
     dry_run = "--dry-run" in sys.argv
     seen = ThreadSafeDict(load_seen())
     history = price_history.load_history()
-    published_deals = ds.load_deals()
+    published_deals = ThreadSafeDict(ds.load_deals())
     alerts = alert_store.load_alerts()
     global _click_links
     _click_links = click_tracker.load_links()
@@ -1538,6 +2185,7 @@ def main() -> None:
         chat_interval_seconds=cfg.telegram_chat_interval_seconds,
         global_messages_per_second=cfg.telegram_global_messages_per_second,
     )
+    bot_commands.configure(cfg)
 
     if cfg.click_tracking_enabled and not dry_run:
         click_server.start(cfg.click_server_port, _click_links)

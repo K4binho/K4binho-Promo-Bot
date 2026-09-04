@@ -1,10 +1,15 @@
 import json
+import os
+import tempfile
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 STORE_PATH = Path(__file__).parent / "seen.json"
 PLUS_PREFIXES = ("steam:", "nuuvem:", "gmg:")
 PLUS_EXPIRE_DAYS = 7
+
+_save_lock = threading.Lock()
 
 
 def load_seen() -> dict[str, str]:
@@ -23,10 +28,24 @@ def load_seen() -> dict[str, str]:
 
 
 def save_seen(seen: dict[str, str]) -> None:
-    STORE_PATH.write_text(
-        json.dumps(seen, ensure_ascii=False, separators=(",", ":")),
-        encoding="utf-8",
-    )
+    """Grava de forma atomica (arquivo temp + rename) e serializada entre
+    threads, pra nao corromper o arquivo se duas fontes salvarem ao mesmo
+    tempo nem perder o arquivo inteiro se o processo morrer no meio da
+    escrita.
+    """
+    payload = json.dumps(dict(seen), ensure_ascii=False, separators=(",", ":"))
+    with _save_lock:
+        fd, tmp_path = tempfile.mkstemp(
+            dir=STORE_PATH.parent, prefix=STORE_PATH.name + ".", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(payload)
+            os.replace(tmp_path, STORE_PATH)
+        except OSError:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
 
 
 def mark_seen(seen: dict[str, str], item_id: str) -> None:

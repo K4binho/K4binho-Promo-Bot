@@ -1,8 +1,12 @@
 from pathlib import Path
 
+import logging
+
 from playwright.sync_api import sync_playwright
 
 import promotion_engine
+
+log = logging.getLogger("k4binho")
 
 USER_DATA_DIR = Path(__file__).parent / "ml_profile"
 LINKS_URL = "https://www.mercadolivre.com.br/affiliate-program/api/v2/stripe/user/links"
@@ -13,9 +17,16 @@ class NotLoggedIn(Exception):
     pass
 
 
-def _launch(p, headless: bool):
+def _launch(p, headless: bool, offscreen: bool = False):
+    kwargs = {}
+    if offscreen:
+        # Chrome "de verdade" (headed), mas nasce fora da area visivel do
+        # monitor. Nao rouba foco, nao minimiza sua janela atual, e nao
+        # sofre o throttling de background tab (quem dirige e o Playwright
+        # via CDP, nao timers de JS da pagina).
+        kwargs["args"] = ["--window-position=3000,3000", "--window-size=1280,800"]
     return p.chromium.launch_persistent_context(
-        str(USER_DATA_DIR), headless=headless, channel="chrome"
+        str(USER_DATA_DIR), headless=headless, channel="chrome", **kwargs
     )
 
 
@@ -114,7 +125,7 @@ def discover_promotions(product_urls: list[str]) -> dict[str, list[promotion_eng
     if not USER_DATA_DIR.exists(): raise NotLoggedIn("Sem sessao. Rode: python login_ml.py")
     results={}
     with sync_playwright() as p:
-        ctx=_launch(p,headless=False); page=ctx.pages[0] if ctx.pages else ctx.new_page()
+        ctx=_launch(p,headless=False,offscreen=True); page=ctx.pages[0] if ctx.pages else ctx.new_page()
         try:
             for i,url in enumerate(product_urls):
                 try:
@@ -130,13 +141,13 @@ def discover_promotions(product_urls: list[str]) -> dict[str, list[promotion_eng
 def generate_links(
     product_urls: list[str], tag: str
 ) -> dict[str, tuple[str | None, str | None]]:
-    """Retorna {url_produto: (short_url, image_url)}. Reusa a sessao persistente. Chrome visivel."""
+    """Retorna {url_produto: (short_url, image_url)}. Reusa a sessao persistente. Chrome roda fora da tela."""
     if not USER_DATA_DIR.exists():
         raise NotLoggedIn("Sem sessao. Rode: python login_ml.py")
 
     results: dict[str, tuple[str | None, str | None]] = {}
     with sync_playwright() as p:
-        ctx = _launch(p, headless=False)
+        ctx = _launch(p, headless=False, offscreen=True)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
 
         for i, url in enumerate(product_urls):
@@ -154,6 +165,7 @@ def generate_links(
                     """async ({ endpoint, tag, url, csrf }) => {
                         const response = await fetch(endpoint, {
                             method: 'POST',
+                            credentials: 'include',
                             headers: {
                                 'content-type': 'application/json',
                                 'x-csrf-token': csrf,
@@ -165,6 +177,14 @@ def generate_links(
                     {"endpoint": LINKS_URL, "tag": tag, "url": url, "csrf": csrf},
                 )
                 if result["status"] in (401, 403):
+                    cookie_map = sorted(
+                        {(c["name"], c["domain"]) for c in ctx.cookies()}
+                    )
+                    log.warning(
+                        "[ML] 401/403 na API de link - ssid presente: %s | _csrf presente: %s (len=%d) | corpo: %s",
+                        bool(_cookie(ctx, "ssid")), bool(csrf), len(csrf), result["body"],
+                    )
+                    log.warning("[ML] cookies presentes (nome, dominio): %s", cookie_map)
                     raise NotLoggedIn(
                         f"Sessao invalida ({result['status']}). Rode: python login_ml.py"
                     )

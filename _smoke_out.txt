@@ -1,0 +1,15 @@
+== red dead redemption 28
+   rel=1.00 steam         197.92 Red Dead Redemption
+   rel=0.75 steam          74.97 Red Dead Redemption 2
+   rel=0.38 shopee         59.93 Red Dead Redemption 2 Figure Lâmpada Led Notur
+   rel=0.27 shopee         12.99 Quadro Placas Decorativas Poster geek Red Dead
+== palworld 34
+   rel=1.00 steam          62.29 Palworld
+   rel=0.33 steam          14.34 Palworld - Soundtrack
+   rel=0.17 shopee         39.99 Action Figure Boneco Chikipi - Palworld
+   rel=0.17 shopee         40.00 Action figure Boneco Depresso - Palworld
+== lego star wars 9
+   rel=0.30 shopee         23.50 Lego - Star Wars - 70 Etiquetas Adesivas Rótul
+   rel=0.23 shopee         10.90 Kit 80 Desenhos de Lego Star Wars Para Colorir
+   rel=0.23 shopee         16.15 ADESIVOS RECORTADOS - LEGO STAR WARS -  TAGS, 
+   rel=0.17 shopee         69.90 930 pçs compatível Lego Star Wars navalha coro

@@ -196,7 +196,43 @@ def _parse_resolved_bundles(payload: list[dict]) -> list[GameDeal]:
     return deals
 
 
-def _parse_results_html(html: str) -> list[GameDeal]:
+def search_by_keyword(
+    keywords: str,
+    *,
+    country: str = "BR",
+    limit: int = 20,
+) -> list[GameDeal]:
+    """Busca por termo, pra atender pedido do usuario na hora.
+
+    Usa `term`, nao `query`: com `query` a Steam ignora o texto e devolve o topo
+    de vendas (mesmo `total_count` pra qualquer busca). Sem `specials=1` e sem
+    exigir desconto: quem pede um jogo quer saber o preco dele mesmo a preco
+    cheio. Exigir desconto fazia a busca por 'skyrim' devolver zero jogo e sobrar
+    so caneca e chaveiro das lojas fisicas.
+    """
+    if not keywords.strip():
+        return []
+    resp = httpx.get(
+        SEARCH_URL,
+        params={
+            "term": keywords,
+            "start": 0,
+            "count": min(max(limit, 1), PAGE_SIZE),
+            "cc": country.lower(),
+            "infinite": 1,
+            "l": "brazilian",
+        },
+        headers={"Accept": "application/json"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    html = resp.json().get("results_html", "")
+    if not html.strip():
+        return []
+    return _parse_results_html(html, require_discount=False)[:limit]
+
+
+def _parse_results_html(html: str, *, require_discount: bool = True) -> list[GameDeal]:
     deals: list[GameDeal] = []
 
     # Steam search rows may represent an app, a package/sub, or a bundle.
@@ -243,9 +279,9 @@ def _parse_results_html(html: str) -> list[GameDeal]:
         title = title_m.group(1).strip()
 
         discount_m = re.search(r'class="discount_pct[^"]*"[^>]*>-(\d+)%', row_html)
-        if not discount_m:
+        if not discount_m and require_discount:
             continue
-        discount = int(discount_m.group(1))
+        discount = int(discount_m.group(1)) if discount_m else 0
 
         original_m = re.search(
             r'class="discount_original_price"[^>]*>\s*R\$\s*([\d.,]+)',

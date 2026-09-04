@@ -18,3 +18,4 @@ promotion_cache.json
 promotion_state.json
 promotions.json
 *.zip
+graphify-out/

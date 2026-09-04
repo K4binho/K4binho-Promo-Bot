@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 from unittest import mock
 
 import alert_store
+import bot_commands
 
 
 class AlertStoreTest(unittest.TestCase):
@@ -116,6 +117,37 @@ class AlertStoreTest(unittest.TestCase):
         alerts["123"][0]["notified"]["MLB123"]["at"] = expired_time
         after_cooldown = alert_store.match_deal(alerts, "SSD Kingston 1TB", 289.0, "ml", product_id="MLB123")
         self.assertEqual(len(after_cooldown), 1)
+
+
+class AlertTextParseTest(unittest.TestCase):
+    def test_abaixo_sem_de(self):
+        self.assertEqual(bot_commands._parse_alert_text("ssd abaixo 500"), ("ssd", 500.0))
+
+    def test_abaixo_de(self):
+        self.assertEqual(
+            bot_commands._parse_alert_text("lego star wars abaixo de 100"),
+            ("lego star wars", 100.0),
+        )
+
+    def test_sinonimos_de_limite(self):
+        for texto, esperado in [
+            ("monitor ate 1500", ("monitor", 1500.0)),
+            ("fone menos de 99,90", ("fone", 99.9)),
+            ("placa de video max 2000", ("placa de video", 2000.0)),
+            ("ssd por R$ 350", ("ssd", 350.0)),
+        ]:
+            self.assertEqual(bot_commands._parse_alert_text(texto), esperado)
+
+    def test_separador_de_milhar(self):
+        self.assertEqual(
+            bot_commands._parse_alert_text("notebook ate 3.200,00"), ("notebook", 3200.0)
+        )
+
+    def test_sem_preco(self):
+        self.assertEqual(bot_commands._parse_alert_text("rtx 5070"), ("rtx 5070", None))
+
+    def test_numero_solto_nao_e_preco(self):
+        self.assertEqual(bot_commands._parse_alert_text("teclado 60"), ("teclado 60", None))
 
 
 if __name__ == "__main__":

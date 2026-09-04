@@ -67,7 +67,9 @@ class TelegramRealtimeListener:
                             "offset": self._offset,
                             "timeout": self.timeout_seconds,
                             # Telegram Bot API expects a JSON-serialized list.
-                            "allowed_updates": json.dumps(["message"]),
+                            # callback_query entra porque a caca pergunta jogo
+                            # ou item com botao inline.
+                            "allowed_updates": json.dumps(["message", "callback_query"]),
                         },
                     )
                     response.raise_for_status()

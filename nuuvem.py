@@ -2,6 +2,7 @@
 
 import re
 from dataclasses import dataclass, field
+from html import unescape
 
 import httpx
 
@@ -35,6 +36,23 @@ class NuuvemDeal:
     review_count: int | None = None
 
 
+_STOP_WORDS = re.compile(r'\bPa[ií]ses:|Acesse Agora|Usos extremamente', re.IGNORECASE)
+# Nomes de jogo aparecem em Title Case/CAPS na descricao; conectores em
+# portugues ("de", "para", "o", "as versoes", "lancamento") ficam em
+# minusculas, entao o maior trecho contiguo capitalizado tende a ser o
+# nome do jogo (ou parte substancial dele, o suficiente pro match por
+# substring em _match_coupon).
+_CAPITALIZED_RUN = re.compile(r'[A-Z\u00c0-\u00dd0-9][\w\u00c0-\u00ff]*(?:[\s:\-]+[A-Z\u00c0-\u00dd0-9][\w\u00c0-\u00ff]*)*')
+
+
+def _extract_game_name(window: str) -> str:
+    cut = _STOP_WORDS.split(window)[0]
+    candidates = [c.strip() for c in _CAPITALIZED_RUN.findall(cut) if len(c.strip()) > 2]
+    if not candidates:
+        return ""
+    return max(candidates, key=len)[:80]
+
+
 def fetch_coupons() -> list[NuuvemCoupon]:
     try:
         resp = httpx.get(COUPONS_URL, timeout=30, follow_redirects=True)
@@ -43,44 +61,43 @@ def fetch_coupons() -> list[NuuvemCoupon]:
     except httpx.HTTPError:
         return []
 
+    # A pagina de cupons muda de layout HTML a cada campanha (classes e
+    # tags diferentes por evento). Em vez de depender de marcacao
+    # especifica, removemos toda tag e trabalhamos sobre o texto visivel,
+    # que e estavel: cada cupom aparece como "Cupom: CODIGO" seguido de
+    # "Descricao: X% de desconto ... <jogo>".
+    text = unescape(re.sub(r'<[^>]+>', ' ', resp.text))
+    text = re.sub(r'\s+', ' ', text)
+
     coupons: list[NuuvemCoupon] = []
-    text = resp.text
+    matches = list(re.finditer(r'Cupom:\s*([A-Z0-9][A-Z0-9]{2,19})\b', text))
+    for i, m in enumerate(matches):
+        code = m.group(1)
+        next_code_pos = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        segment_limit = min(next_code_pos, m.end() + 400)
+        # "Acesse Agora" fecha cada card de cupom na pagina; usa como fim
+        # do bloco quando presente pra nao vazar texto do proximo item
+        # (inclusive itens sem "Cupom:" com dois-pontos, como recompensas
+        # automaticas do tipo "Cupom de R$30 em compras").
+        acesse_pos = text.find("Acesse Agora", m.end(), segment_limit)
+        window_end = acesse_pos + len("Acesse Agora") if acesse_pos != -1 else segment_limit
+        window = text[m.end():window_end]
 
-    blocks = re.split(r'<(?:div|article|section)[^>]*class="[^"]*coupon[^"]*"', text, flags=re.IGNORECASE)
-    if len(blocks) <= 1:
-        code_pattern = re.findall(
-            r'(?:code|cupom|coupon)[^>]*>([A-Z0-9]{4,20})</[^>]*>.*?'
-            r'(\d+%|R\$\s*\d+)',
-            text, re.IGNORECASE | re.DOTALL
-        )
-        for code, discount in code_pattern:
-            coupons.append(NuuvemCoupon(
-                code=code.strip(),
-                discount=discount.strip(),
-                game="",
-                region="BR",
-            ))
+        pct_m = re.search(r'(\d+%)\s*de desconto', window, re.IGNORECASE)
+        val_m = re.search(r'(R\$\s*[\d.,]+)', window)
+        discount_m = pct_m or val_m
+        if not discount_m:
+            # Sem percentual/valor identificavel: nao ha evidencia
+            # suficiente do beneficio, nao anuncia (mesma regra usada no
+            # motor de cupons para outras fontes).
+            continue
+        discount = discount_m.group(1)
 
-    if not coupons:
-        lines = text.split('\n')
-        for i, line in enumerate(lines):
-            code_m = re.search(r'<(?:strong|b|code|span)[^>]*>\s*([A-Z][A-Z0-9]{3,19})\s*</(?:strong|b|code|span)>', line)
-            if code_m:
-                code = code_m.group(1)
-                context = '\n'.join(lines[max(0, i-3):i+5])
-                disc_m = re.search(r'(\d+%|R\$\s*[\d,.]+)', context)
-                discount = disc_m.group(1) if disc_m else ""
-                game_m = re.search(r'(?:para|for|em)\s+(.+?)(?:<|$|\.|,)', context, re.IGNORECASE)
-                game = game_m.group(1).strip() if game_m else ""
-                if discount:
-                    coupons.append(NuuvemCoupon(
-                        code=code,
-                        discount=discount,
-                        game=game[:80],
-                        region="BR",
-                    ))
+        game = _extract_game_name(window[discount_m.end():])
+        coupons.append(NuuvemCoupon(code=code, discount=discount, game=game, region="BR"))
 
     return coupons
+
 
 
 def _match_coupon(title: str, coupons: list[NuuvemCoupon]) -> NuuvemCoupon | None:
@@ -94,6 +111,48 @@ def _match_coupon(title: str, coupons: list[NuuvemCoupon]) -> NuuvemCoupon | Non
     return None
 
 
+CAMPAIGN_URL = "https://www.nuuvem.com/lp/pt/campanha/"
+
+
+def fetch_campaign_coupons() -> list[NuuvemCoupon]:
+    """Cupons de plataforma (sem jogo especifico) anunciados na landing page
+    da campanha ativa (ex.: "garanta 15% OFF em suas compras"). So existem
+    durante eventos; fora de campanha a pagina nao tem esse padrao e a
+    funcao retorna lista vazia normalmente."""
+    try:
+        resp = httpx.get(CAMPAIGN_URL, timeout=30, follow_redirects=True)
+        if resp.status_code != 200:
+            return []
+    except httpx.HTTPError:
+        return []
+
+    text = unescape(re.sub(r'<[^>]+>', ' ', resp.text))
+    text = re.sub(r'\s+', ' ', text)
+
+    coupons: list[NuuvemCoupon] = []
+    for m in re.finditer(r'garanta\s+(\d+)%\s*OFF\s*em\s*suas\s*compras', text, re.IGNORECASE):
+        code_m = re.search(r'([A-Z0-9]{4,20})\s*Copiado!', text[m.end():m.end() + 300])
+        if not code_m:
+            continue
+        coupons.append(NuuvemCoupon(code=code_m.group(1), discount=f"{m.group(1)}%", game="", region="BR"))
+    return coupons
+
+
+def _best_platform_coupon(coupons: list[NuuvemCoupon]) -> NuuvemCoupon | None:
+    """Entre os cupons de plataforma (sem jogo especifico associado),
+    escolhe o de maior desconto percentual pra anexar como fallback nas
+    ofertas que nao tem cupom de produto/loja proprio."""
+    platform = [c for c in coupons if not c.game]
+    if not platform:
+        return None
+
+    def _pct(c: NuuvemCoupon) -> int:
+        pm = re.match(r'(\d+)%', c.discount)
+        return int(pm.group(1)) if pm else 0
+
+    return max(platform, key=_pct)
+
+
 PAGE_SIZE = 50
 MAX_PAGES = 10
 
@@ -105,6 +164,7 @@ def fetch_deals(
         return []
 
     coupons = fetch_coupons()
+    platform_coupon = _best_platform_coupon(fetch_campaign_coupons())
     deals: list[NuuvemDeal] = []
     seen_ids: set[str] = set()
 
@@ -151,6 +211,10 @@ def fetch_deals(
                 continue
             seen_ids.add(game_id)
             coupon = _match_coupon(title, coupons) if coupons else None
+            if coupon is None:
+                # Sem cupom de produto/loja proprio: anexa o cupom de
+                # plataforma da campanha ativa (se houver) como fallback.
+                coupon = platform_coupon
             deals.append(NuuvemDeal(
                 game_id=game_id,
                 title=title,

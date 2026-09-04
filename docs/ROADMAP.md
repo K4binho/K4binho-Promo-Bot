@@ -18,6 +18,7 @@ O projeto está na fase de **curadoria comercial + inteligência promocional**.
 - Promotion Engine com preço listado, preço garantido e preço potencial.
 - Export sanitizado e proteção de segredos em logs.
 - CI com suíte completa de testes.
+- Comandos do Telegram com listener em tempo real, isolamento por tópico e proteção administrativa.
 
 ## Promotion Engine V1.1
 
@@ -79,9 +80,15 @@ O motor já aceita catálogo de cupons e escolhe a melhor regra aplicável. Falt
 
 O redirect existe, mas `localhost` não serve usuários do Telegram. Publicar endpoint HTTPS antes de usar cliques como sinal de otimização.
 
-### P1 — Shopee
+### Concluído — Shopee
 
-Estrutura promocional preparada, mas integração comercial real continua pendente de fonte/API/credenciais adequadas.
+Ciclo comercial ativo em `bot.py` (`run_shopee_cycle`): produto, cupom de campanha (`shopeeOfferV2` + catálogo), deeplink (`generateShortLink`), score e validação de link antes de publicar.
+Pendente: rodar com credenciais reais em `--dry-run` (o `SHOPEE_APP_SECRET` fornecido foi exposto fora do `.env` e precisa ser rotacionado antes de ir a produção).
+
+### P2 — Kabum
+
+Há um scraper isolado e geração de link, mas o módulo não participa de `bot.py`.
+Só ativar depois de validar estabilidade da fonte e modelo de afiliação.
 
 ### P2 — SQLite
 
@@ -94,7 +101,7 @@ Evoluir `/status` para incluir último ciclo por fonte, erros recentes, sessão 
 ## Regras de produto
 
 - ML/Ali são fontes comerciais e merecem prioridade de conversão.
-- Steam/Nuuvem/GMG continuam como PLUS/editorial.
+- Steam/Nuuvem/GMG continuam como PLUS/editorial; Shopee é comercial.
 - Cupom só altera score garantido quando a condição é confiável.
 - Benefício condicionado a app, moedas ou usuários selecionados não deve ser anunciado como universal.
 - Produto visto pode voltar apenas diante de nova oportunidade relevante, respeitando cooldown.
@@ -104,10 +111,11 @@ Evoluir `/status` para incluir último ciclo por fonte, erros recentes, sessão 
 ## Estado dos testes
 
 ```text
-114 passed
+188 passed
 ```
 
-A validação automatizada cobre a suíte anterior e os guardrails novos da V1.1.
+A validação automatizada cobre a suíte anterior, os guardrails novos da V1.1,
+resiliência de APIs e o listener de comandos do Telegram.
 
 ## Segurança
 

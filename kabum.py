@@ -1,16 +1,16 @@
-"""Kabum deals via scraping + Awin affiliate link generation."""
+"""Kabum deals via Next.js catalog payload + Awin affiliate link generation."""
 
+import json
 import logging
 import re
 from dataclasses import dataclass
-from html import unescape
 
 import httpx
 
 log = logging.getLogger("k4binho")
 
-OFERTAS_URL = "https://www.kabum.com.br/ofertas"
-AWIN_LINK_URL = "https://www.awin1.com/publishers/{publisher_id}/linkbuilder/generate"
+OFERTAS_URL = "https://www.kabum.com.br/promocao/maisvendidos"
+AWIN_LINK_URL = "https://api.awin.com/publishers/{publisher_id}/linkbuilder/generate"
 KABUM_ADVERTISER_ID = 17729
 
 HEADERS = {
@@ -20,6 +20,11 @@ HEADERS = {
     ),
     "Accept-Language": "pt-BR,pt;q=0.9",
 }
+
+_NEXT_DATA_RE = re.compile(
+    r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+    re.DOTALL,
+)
 
 
 @dataclass
@@ -33,23 +38,55 @@ class KabumDeal:
     image_url: str
 
 
-_PRODUCT_RE = re.compile(
-    r'<a[^>]+href="(/produto/(\d+)/[^"]*)"[^>]*>.*?</a>',
-    re.DOTALL,
-)
-_TITLE_RE = re.compile(r'class="[^"]*nameCard[^"]*"[^>]*>([^<]+)<')
-_PRICE_RE = re.compile(r'class="[^"]*priceCard[^"]*"[^>]*>\s*R\$\s*([\d.,]+)')
-_OLD_PRICE_RE = re.compile(r'class="[^"]*oldPriceCard[^"]*"[^>]*>\s*R\$\s*([\d.,]+)')
-_DISCOUNT_RE = re.compile(r'class="[^"]*labelDiscount[^"]*"[^>]*>\s*(\d+)%')
-_IMG_RE = re.compile(r'<img[^>]+src="(https://images\d*\.kabum\.com\.br/[^"]+)"')
+def _effective_price(item: dict) -> float:
+    """A pagina aplica um desconto "geral" (priceWithDiscount) e, por cima,
+    um desconto de oferta por tempo limitado (offer.priceWithDiscount), que
+    quando presente e sempre o preco final mais baixo."""
+    offer = item.get("offer") or {}
+    offer_price = offer.get("priceWithDiscount")
+    if offer_price:
+        return float(offer_price)
+    price_with_discount = item.get("priceWithDiscount")
+    if price_with_discount:
+        return float(price_with_discount)
+    return float(item.get("price") or 0.0)
 
 
-def _parse_brl(value: str) -> float:
-    cleaned = value.replace(".", "").replace(",", ".")
-    try:
-        return float(cleaned)
-    except ValueError:
-        return 0.0
+def _original_price(item: dict) -> float | None:
+    original = item.get("price") or item.get("oldPrice")
+    return float(original) if original else None
+
+
+def _parse_item(item: dict) -> KabumDeal | None:
+    product_id = str(item.get("code") or "")
+    if not product_id:
+        return None
+
+    price = _effective_price(item)
+    if price <= 0:
+        return None
+
+    original = _original_price(item)
+    if original and original > price:
+        discount = round((original - price) / original * 100)
+    else:
+        discount = 0
+
+    friendly_name = item.get("friendlyName") or ""
+    permalink = f"https://www.kabum.com.br/produto/{product_id}/{friendly_name}"
+
+    images = item.get("images") or []
+    image_url = item.get("image") or (images[0] if images else "")
+
+    return KabumDeal(
+        product_id=product_id,
+        title=item.get("name") or "",
+        price=price,
+        original_price=original,
+        discount_percent=discount,
+        permalink=permalink,
+        image_url=image_url,
+    )
 
 
 def scrape_deals(min_discount: int = 10) -> list[KabumDeal]:
@@ -60,60 +97,40 @@ def scrape_deals(min_discount: int = 10) -> list[KabumDeal]:
         log.error("[Kabum] scrape: %s", exc)
         return []
 
-    html = resp.text
+    match = _NEXT_DATA_RE.search(resp.text)
+    if not match:
+        log.error("[Kabum] scrape: __NEXT_DATA__ nao encontrado no HTML")
+        return []
+
+    try:
+        next_data = json.loads(match.group(1))
+        items = next_data["props"]["pageProps"]["data"]["catalogServer"]["data"]
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        log.error("[Kabum] scrape: payload inesperado: %s", exc)
+        return []
+
     deals: list[KabumDeal] = []
     seen_ids: set[str] = set()
-
-    cards = re.split(r'class="[^"]*productCard[^"]*"', html)
-    for card in cards[1:]:
-        link_m = re.search(r'href="/produto/(\d+)/([^"]*)"', card)
-        if not link_m:
+    for item in items:
+        deal = _parse_item(item)
+        if deal is None or deal.product_id in seen_ids:
             continue
-        product_id = link_m.group(1)
-        if product_id in seen_ids:
+        if deal.discount_percent < min_discount:
             continue
-        seen_ids.add(product_id)
-
-        slug = link_m.group(2)
-        permalink = f"https://www.kabum.com.br/produto/{product_id}/{slug}"
-
-        title_m = _TITLE_RE.search(card)
-        title = unescape(title_m.group(1).strip()) if title_m else ""
-
-        price_m = _PRICE_RE.search(card)
-        price = _parse_brl(price_m.group(1)) if price_m else 0.0
-        if price <= 0:
-            continue
-
-        old_m = _OLD_PRICE_RE.search(card)
-        original = _parse_brl(old_m.group(1)) if old_m else None
-
-        disc_m = _DISCOUNT_RE.search(card)
-        if disc_m:
-            discount = int(disc_m.group(1))
-        elif original and original > price:
-            discount = round((original - price) / original * 100)
-        else:
-            discount = 0
-
-        if discount < min_discount:
-            continue
-
-        img_m = _IMG_RE.search(card)
-        image_url = img_m.group(1) if img_m else ""
-
-        deals.append(KabumDeal(
-            product_id=product_id,
-            title=title,
-            price=price,
-            original_price=original,
-            discount_percent=discount,
-            permalink=permalink,
-            image_url=image_url,
-        ))
+        seen_ids.add(deal.product_id)
+        deals.append(deal)
 
     deals.sort(key=lambda d: d.discount_percent, reverse=True)
     return deals
+
+
+def ensure_affiliate_link(awin_token: str, publisher_id: int, deal: "KabumDeal") -> str:
+    """Garante link rastreado via Awin. Se a geracao falhar, mantem o link
+    direto do produto em vez de descartar a oferta."""
+    if not deal.permalink:
+        return ""
+    link = generate_affiliate_link(awin_token, publisher_id, deal.permalink)
+    return link or deal.permalink
 
 
 def generate_affiliate_link(

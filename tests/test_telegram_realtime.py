@@ -69,7 +69,7 @@ def test_listener_serializes_allowed_updates_and_advances_offset():
     assert listener._offset == 8
     params = client.get.call_args.kwargs["params"]
     assert params["offset"] == 3
-    assert params["allowed_updates"] == '["message"]'
+    assert params["allowed_updates"] == '["message", "callback_query"]'
 
 
 def test_listener_can_restart_after_stop():

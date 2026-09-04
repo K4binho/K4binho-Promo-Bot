@@ -6,9 +6,20 @@ import time
 import httpx
 
 import promotion_engine
+from hashtag_categorizer import classify_hashtag
 
 MESSAGE_URL = "https://api.telegram.org/bot{token}/sendMessage"
 PHOTO_URL = "https://api.telegram.org/bot{token}/sendPhoto"
+DELETE_URL = "https://api.telegram.org/bot{token}/deleteMessage"
+ANSWER_CALLBACK_URL = "https://api.telegram.org/bot{token}/answerCallbackQuery"
+
+# Conexao reaproveitada: sem pool, cada envio paga handshake TLS novo com o
+# api.telegram.org (medido ~750ms contra ~240ms reusando). Isso aparecia como
+# lentidao na resposta a comando no privado. httpx.Client e thread-safe.
+_client = httpx.Client(
+    timeout=30,
+    limits=httpx.Limits(max_keepalive_connections=8, keepalive_expiry=120.0),
+)
 
 
 class TelegramRateLimiter:
@@ -65,6 +76,14 @@ class TelegramRateLimiter:
 
 
 _rate_limiter = TelegramRateLimiter()
+# Fila propria pra resposta interativa (DM, /buscar, alerta). O ciclo publica
+# em rajada no canal e esgota o orcamento global do _rate_limiter; sem fila
+# separada, resposta de comando ficava atras dessa rajada mesmo sendo chat
+# diferente. Intervalo por chat curto de proposito: cada resposta e pra um
+# chat distinto, o que protege e so o teto global.
+_interactive_rate_limiter = TelegramRateLimiter(
+    chat_interval_seconds=0.2, global_messages_per_second=20,
+)
 
 
 def configure_rate_limits(
@@ -76,7 +95,10 @@ def configure_rate_limits(
 
 def send_message(token: str, channel_id: str, text: str,
                  thread_id: int | None = None,
-                 image_url: str | None = None) -> None:
+                 image_url: str | None = None,
+                 reply_markup: dict | None = None,
+                 *,
+                 interactive: bool = False) -> int | None:
     if image_url:
         url = PHOTO_URL.format(token=token)
         payload = {
@@ -95,9 +117,53 @@ def send_message(token: str, channel_id: str, text: str,
         }
     if thread_id is not None:
         payload["message_thread_id"] = thread_id
-    _rate_limiter.wait(str(channel_id))
-    resp = httpx.post(url, json=payload, timeout=30)
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    limiter = _interactive_rate_limiter if interactive else _rate_limiter
+    limiter.wait(str(channel_id))
+    resp = _client.post(url, json=payload)
     resp.raise_for_status()
+    try:
+        result = resp.json().get("result") or {}
+    except ValueError:
+        return None
+    message_id = result.get("message_id") if isinstance(result, dict) else None
+    return int(message_id) if message_id is not None else None
+
+
+def delete_message(token: str, channel_id: str, message_id: int) -> bool:
+    """Apaga uma mensagem já publicada. Retorna False se o Telegram recusar.
+
+    Recusa é esperada e não fatal: a Bot API só deixa apagar mensagem de até
+    48h, e o post pode já ter sido apagado à mão.
+    """
+    url = DELETE_URL.format(token=token)
+    _rate_limiter.wait(str(channel_id))
+    try:
+        resp = _client.post(
+            url,
+            json={"chat_id": channel_id, "message_id": int(message_id)},
+        )
+    except httpx.HTTPError:
+        return False
+    if resp.status_code >= 400:
+        return False
+    try:
+        return bool(resp.json().get("ok"))
+    except ValueError:
+        return False
+
+
+def answer_callback_query(token: str, callback_id: str, text: str = "") -> bool:
+    """Para o relogio de carregamento do botao. Sem isso o cliente fica girando."""
+    try:
+        resp = _client.post(
+            ANSWER_CALLBACK_URL.format(token=token),
+            json={"callback_query_id": callback_id, "text": text},
+        )
+    except httpx.HTTPError:
+        return False
+    return resp.status_code < 400
 
 
 def _format_price_brl(value: float) -> str:
@@ -195,11 +261,14 @@ def format_deal(
     avg_price_30d: float | None = None,
     history_confidence: str = "low",
     promotion: promotion_engine.PriceEvaluation | None = None,
+    category: str = "",
+    source_category: str = "",
 ) -> str:
     comparison_price = promotion.scoring_price if promotion is not None else price
     effective_discount = discount
     if original_price and original_price > comparison_price:
         effective_discount = round((original_price - comparison_price) / original_price * 100)
+    hashtag = category or classify_hashtag(title, source_category=source_category)
     is_lowest = (
         min_price_30d is not None
         and comparison_price <= min_price_30d
@@ -207,7 +276,7 @@ def format_deal(
     )
 
     header = _deal_header(effective_discount, is_lowest, history_confidence)
-    lines = [header, ""]
+    lines = [f"🟡 <b>MERCADO LIVRE</b> | {hashtag}", "", header, ""]
     lines.append(f"📦 <b>{escape(title)}</b>")
     lines.append("")
 
@@ -303,8 +372,11 @@ def format_aliexpress_deal(
     commission_rate: float = 0,
     sales_count: int = 0,
     promotion: promotion_engine.PriceEvaluation | None = None,
+    category: str = "",
+    source_category: str = "",
 ) -> str:
-    lines = ["🛍️ <b>ALIEXPRESS</b>", ""]
+    hashtag = category or classify_hashtag(title, source_category=source_category)
+    lines = [f"🔴 <b>ALIEXPRESS</b> | {hashtag}", ""]
     lines.append(f"📦 <b>{escape(title)}</b>")
     lines.append("")
 
@@ -332,13 +404,56 @@ def format_shopee_deal(
     title: str,
     price: float,
     link: str,
+    original_price: float | None = None,
+    discount: int = 0,
+    store: str = "",
+    commission_rate: float = 0,
+    sales_count: int = 0,
+    rating: float = 0.0,
     promotion: promotion_engine.PriceEvaluation | None = None,
+    category: str = "",
+    source_category: str = "",
 ) -> str:
-    lines = ["🛍️ <b>SHOPEE</b>", "", f"📦 <b>{escape(title)}</b>", ""]
-    lines.append(f"💰 <b>{_format_price_brl(price)}</b>")
+    hashtag = category or classify_hashtag(title, source_category=source_category)
+    lines = [f"🟠 <b>SHOPEE</b> | {hashtag}", "", f"📦 <b>{escape(title)}</b>", ""]
+    if store:
+        lines.append(f"🏪 {escape(store)}")
+
+    lines.extend(_price_block(price, original_price, discount))
     promo_lines = _promotion_lines(promotion)
     if promo_lines:
         lines.extend(promo_lines)
+
+    selos = []
+    if rating and rating >= 4.5:
+        selos.append(f"⭐ {rating:.1f}")
+    if sales_count >= 1000:
+        selos.append(f"🛒 {sales_count // 1000}mil+ vendidos")
+    elif sales_count > 0:
+        selos.append(f"🛒 {sales_count}+ vendidos")
+    if selos:
+        lines.append("")
+        lines.append(" · ".join(selos))
+
+    lines.append("")
+    lines.append(f'<a href="{escape(link)}">VER OFERTA</a>')
+    return "\n".join(lines)
+
+
+def format_kabum_deal(
+    title: str,
+    price: float,
+    link: str,
+    original_price: float | None = None,
+    discount: int = 0,
+    promotion: promotion_engine.PriceEvaluation | None = None,
+) -> str:
+    lines = ["🛍️ <b>KABUM</b>", "", f"📦 <b>{escape(title)}</b>", ""]
+    lines.extend(_price_block(price, original_price, discount))
+    promo_lines = _promotion_lines(promotion)
+    if promo_lines:
+        lines.extend(promo_lines)
+
     lines.append("")
     lines.append(f'<a href="{escape(link)}">VER OFERTA</a>')
     return "\n".join(lines)

@@ -8,7 +8,20 @@ Atualizado em **2026-09-01**.
 2. Instale dependências com `pip install -r requirements.txt`.
 3. Faça login do Mercado Livre com `python login_ml.py` quando a sessão expirar.
 4. Rode `python -m pytest -q` antes de colocar uma atualização importante em produção.
-5. Inicie pelo script operacional já usado no Windows (`reiniciar_bot.bat`/`run_bot.bat`) ou diretamente com Python.
+5. Valide um ciclo sem publicação com `python bot.py --dry-run`.
+6. Inicie pelo script operacional já usado no Windows (`reiniciar_bot.bat`/`run_bot.bat`) ou diretamente com Python.
+
+Modos disponíveis:
+
+```powershell
+python bot.py --dry-run  # executa um ciclo e não publica
+python bot.py --once     # executa um ciclo real e encerra
+python bot.py            # repete os ciclos conforme POLL_INTERVAL_SECONDS
+```
+
+O processo mantém uma trava local na porta `47591`. Se já houver uma instância,
+a nova execução encerra. Os scripts de reinício localizam e finalizam o processo
+por essa mesma porta antes de iniciar o bot novamente.
 
 ## Promotion Engine V1.1
 
@@ -92,10 +105,27 @@ Isso evita o comportamento antigo em que quase todo o catálogo tinha histórico
 A suíte automatizada atual possui:
 
 ```text
-114 passed
+188 passed
 ```
 
 Além da suíte anterior, há testes para fallback, sinais, cache positivo, revival e segurança do scanner interativo.
+
+Última verificação local em **2026-09-01**: `188 passed in 0.88s`.
+
+## Arquivos de estado
+
+Os arquivos abaixo são operacionais e não devem ser usados como documentação
+nem compartilhados sem sanitização:
+
+- `seen.json`: itens já publicados;
+- `price_history.json`: preço público observado;
+- `deal_store.json`: última publicação e assinatura promocional;
+- `promotion_cache.json`: resultados do scanner de promoções;
+- `alerts.json`: alertas dos usuários;
+- `analytics.jsonl`: eventos de publicação e desempenho;
+- `digest_state.json`: controle do digest diário.
+
+Use `python export_project.py` quando precisar compartilhar o projeto.
 
 ## Segurança
 

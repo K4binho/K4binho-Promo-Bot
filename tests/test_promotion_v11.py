@@ -1,11 +1,11 @@
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-import bot
-import deal_store
-import ml_playwright
-import promotion_engine
-from scoring import ScoreResult
+from k4promo.providers.mercadolivre import promotions as ml_promotions
+from k4promo.storage import deal_store
+from k4promo.providers.mercadolivre import browser as ml_playwright
+from k4promo.services import promotions as promotion_engine
+from k4promo.services.scoring import ScoreResult
 
 
 def _result(total=50, quality=45, conversion=35, confidence=40):
@@ -22,7 +22,7 @@ def _result(total=50, quality=45, conversion=35, confidence=40):
 
 
 def test_commercial_fallback_does_not_depend_on_incomplete_history():
-    assert bot._ml_commercial_fallback_eligible(
+    assert ml_promotions.commercial_fallback_eligible(
         _result(),
         has_price_evidence=True,
         signal_points=2,
@@ -33,7 +33,7 @@ def test_commercial_fallback_does_not_depend_on_incomplete_history():
 
 
 def test_commercial_fallback_rejects_low_quality():
-    assert not bot._ml_commercial_fallback_eligible(
+    assert not ml_promotions.commercial_fallback_eligible(
         _result(quality=20),
         has_price_evidence=True,
         signal_points=4,
@@ -45,7 +45,7 @@ def test_commercial_fallback_rejects_low_quality():
 
 def test_signal_points_rating_alone_is_not_strong():
     deal = SimpleNamespace(sales_count=120, rating=4.9, official_store=False)
-    assert bot._ml_signal_points(
+    assert ml_promotions.signal_points(
         deal,
         is_best_seller=False,
         is_trending=False,
@@ -55,7 +55,7 @@ def test_signal_points_rating_alone_is_not_strong():
 
 def test_signal_points_best_seller_is_strong():
     deal = SimpleNamespace(sales_count=0, rating=0, official_store=False)
-    assert bot._ml_signal_points(
+    assert ml_promotions.signal_points(
         deal,
         is_best_seller=True,
         is_trending=False,

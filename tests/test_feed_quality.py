@@ -1,8 +1,8 @@
 import unittest
 from datetime import UTC, datetime, timedelta
 
-import scoring
-import seen_store
+from k4promo.services import scoring
+from k4promo.storage import seen_store
 
 
 class ScoreAliexpressTest(unittest.TestCase):
@@ -49,7 +49,7 @@ class ScoreAliexpressTest(unittest.TestCase):
 
 class AliDedupTest(unittest.TestCase):
     def test_dedup_keeps_cheapest(self):
-        from aliexpress import AliDeal
+        from k4promo.providers.aliexpress import AliDeal
         deals = [
             AliDeal("1", "K61 Teclado Mecanico", 101.47, 200.0, 49, "link1", "", 5.0, 100),
             AliDeal("2", "K61 Teclado Mecanico", 100.99, 200.0, 50, "link2", "", 5.0, 200),
@@ -67,7 +67,7 @@ class AliDedupTest(unittest.TestCase):
         self.assertEqual(kbd.price, 100.99)
 
     def test_different_titles_kept_separate(self):
-        from aliexpress import AliDeal
+        from k4promo.providers.aliexpress import AliDeal
         deals = [
             AliDeal("1", "SSD NVMe 1TB Kingston", 200.0, 400.0, 50, "l1", "", 5.0, 100),
             AliDeal("2", "SSD NVMe 2TB Samsung", 350.0, 700.0, 50, "l2", "", 5.0, 100),

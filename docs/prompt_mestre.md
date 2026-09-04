@@ -1,6 +1,6 @@
 # Prompt Mestre — K4binho Promo Bot
 
-Atualizado em **2026-09-01**.
+Atualizado em **2026-09-03**.
 
 Use este documento para retomar o projeto sem depender do histórico de uma conversa.
 
@@ -22,12 +22,20 @@ Objetivos:
 
 ## Prioridade das fontes
 
-- Mercado Livre: comercial e prioridade alta.
-- AliExpress: comercial.
-- Steam/Nuuvem/GMG: PLUS/editorial.
-- Shopee: integração real ainda pendente; não fingir suporte completo.
+- Mercado Livre, Shopee, AliExpress, KaBuM: comerciais (comissão).
+- Green Man Gaming: comercial via impact.com (não é CJ Affiliate; `providers/gmg.py`).
+- Steam/Nuuvem: PLUS/editorial, fortalecem o tópico Jogos.
 
 Não remova PLUS só porque não monetiza diretamente.
+
+## Tópicos do Telegram
+
+Sete tópicos do fórum, IDs em `TELEGRAM_TOPIC_*`, prioridade de lojas em `domain/topics.py` (ver `TOPICOS.md`). Regras fixas:
+
+- lojas de jogos só em Jogos; lojas físicas nunca em Jogos;
+- Melhores do Dia é vitrine: sem coleta própria, só cópias com critério;
+- loja fora da lista do tópico cai em Achadinhos;
+- KaBuM normalmente não publica em Moda & Beleza.
 
 ## Arquitetura
 
@@ -38,11 +46,16 @@ Sources
 → Promotion Engine
 → Scoring multidimensional
 → Ranking/diversidade
-→ Scheduler
-→ Telegram
+→ Router (tópico)
+→ Publisher
+→ Vitrine
 → Tracking
 → Analytics
 ```
+
+O código é o pacote `k4promo` em `src/`; `bot.py` na raiz é só lançador.
+A divisão por camadas e o que cada pasta responde estão em `ARQUITETURA.md`.
+Não volte a concentrar ciclo, publicação e duplicação em um arquivo só.
 
 ## Estado atual — Promotion Engine V1.1
 
@@ -60,7 +73,8 @@ Sources
 - produto visto pode voltar por nova promoção + queda relevante + cooldown;
 - histórico de preço armazena preço listado, não cupom temporário;
 - logs do funil ML possuem diagnóstico de scan/cache/fallback/revival;
-- CI e suíte completa: 114 testes passando.
+- distribuição por tópicos + vitrine + Shopee/KaBuM (2026-09-03);
+- CI e suíte completa: 195 testes passando.
 
 ### 🧪 Precisa validação real
 
@@ -77,9 +91,10 @@ Sources
 - Não republicar item visto apenas porque o texto da página mudou.
 - Não contaminar histórico base com preço temporário de cupom.
 - Não anunciar condição personalizada como preço universal.
-- Não adicionar lojas antes de estabilizar medição de cliques/conversões.
+- Não adicionar lojas além das sete mapeadas nos tópicos antes de estabilizar medição de cliques/conversões.
+- Não dar coleta própria a Melhores do Dia nem publicar loja fora da prioridade do tópico.
 - Mudança nova precisa de teste de regressão.
-- Atualize `README.md`, `ROADMAP.md`, `OPERACAO.md` e `ProximosPasso.md` quando o estado real mudar.
+- Atualize `README.md`, `ROADMAP.md`, `OPERACAO.md`, `ProximosPasso.md`, `TOPICOS.md` e `ARQUITETURA.md` quando o estado real mudar.
 
 ## Diagnóstico esperado
 
@@ -100,6 +115,7 @@ Nunca exponha `.env`, token Telegram, chaves de API, `ml_token.json`, `ml_profil
 
 ## Próximas prioridades
 
+0. validar distribuição por tópicos, vitrine, Shopee e KaBuM ao vivo;
 1. validar ML V1.1 ao vivo;
 2. melhorar descoberta global de campanhas quando houver dados;
 3. publicar click tracking em HTTPS;

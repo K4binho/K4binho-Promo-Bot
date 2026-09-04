@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import click_tracker
-import click_server
+from k4promo.storage import click_store as click_tracker
+from k4promo.services import click_server
 
 
 class ClickTrackerTest(unittest.TestCase):

@@ -1,10 +1,22 @@
 # Próximos Passos — K4binho Promo Bot
 
-Atualizado em **2026-09-01**.
+Atualizado em **2026-09-03**.
 
 ## Onde estamos
 
-A prioridade deixou de ser criar mais fontes e passou a ser **fazer o Mercado Livre converter melhor sem perder qualidade**.
+O código foi reorganizado no pacote `k4promo` (`src/`), com um ciclo por arquivo
+e a mecânica de publicação compartilhada. Ver `ARQUITETURA.md`.
+
+O canal virou um fórum com sete tópicos e o bot passou a distribuir cada oferta pelo tópico certo, com uma vitrine "Melhores do Dia" alimentada por cópias. Shopee e KaBuM entraram como fontes com comissão. Detalhes em `TOPICOS.md`.
+
+## Prioridade 0 — validar a distribuição ao vivo
+
+1. `python bot.py --dry-run --once` e conferir `[Shopee]`, `[Kabum]`, `[GMG]`, `[Vitrine]`.
+2. Um ciclo real com `--once` e checar no Telegram se cada publicação caiu no tópico esperado.
+3. Anotar títulos que caíram em Achadinhos indevidamente e ampliar `services/categorizer.py`.
+4. Confirmar que a vitrine não passou de `MELHORES_DO_DIA_MAX_PER_DAY`.
+
+## Prioridade 1 (ML) — fazer o Mercado Livre converter melhor sem perder qualidade
 
 ### ✅ Promotion Engine V1.1 entregue no código
 
@@ -18,7 +30,7 @@ A prioridade deixou de ser criar mais fontes e passou a ser **fazer o Mercado Li
 - nova promoção pode reativar produto visto quando reduz de verdade o preço efetivo;
 - revival tem cooldown e queda mínima;
 - logs ML ganharam diagnóstico detalhado;
-- suíte completa: **114 testes passando**.
+- suíte completa: **181 testes passando**.
 
 ## Prioridade 1 — validar V1.1 ao vivo
 
@@ -62,23 +74,26 @@ Publicar `/go/{deal_id}` em HTTPS público. Depois medir cliques por:
 
 Não mexer automaticamente nos pesos do score até existir volume de dados suficiente.
 
-## Prioridade 4 — Shopee
+## Prioridade 4 — Shopee e KaBuM em regime
 
-Só implementar ciclo comercial real quando houver acesso confiável à fonte/API e aos links afiliados. Não criar integração fictícia só para marcar etapa como concluída.
+Os ciclos existem e são gated por credenciais. Validar contra a resposta real da API antes de subir `SHOPEE_MAX_POSTS_PER_CYCLE`/`KABUM_MAX_POSTS_PER_CYCLE`.
 
 ## Prioridade 5 — SQLite
 
-Depois que ML V1.1 estiver estável, migrar estados persistentes de JSON para SQLite: seen, histórico, deals publicados, promo cache/state, analytics, alertas e cliques.
+Depois que ML V1.1 estiver estável, migrar estados persistentes de JSON para SQLite: seen, histórico, deals publicados, promo cache/state, analytics, alertas, cliques e vitrine.
 
 ## O que NÃO fazer agora
 
-- não adicionar várias lojas novas;
+- não adicionar lojas além das sete já mapeadas nos tópicos;
+- não dar coleta própria ao tópico Melhores do Dia;
+- não publicar produto físico em Jogos nem jogo fora de Jogos;
 - não reduzir `SCORE_MIN` no escuro;
 - não remover guardrails do fallback;
 - não tratar desconto condicional como garantido;
 - não raspar centenas de páginas ML a cada ciclo;
 - não deixar produto já visto ser republicado só porque o texto do cupom mudou;
-- não versionar segredos, perfil do Chrome ou logs operacionais.
+- não versionar segredos, perfil do Chrome ou logs operacionais;
+- não voltar a concentrar ciclos, publicação e duplicação em um arquivo só.
 
 ## Próximo checkpoint
 

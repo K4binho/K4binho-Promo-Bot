@@ -1,7 +1,7 @@
 import unittest
 from datetime import UTC, datetime, timedelta
 
-import price_history
+from k4promo.storage import price_history
 
 
 class PriceHistoryTest(unittest.TestCase):

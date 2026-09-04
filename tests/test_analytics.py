@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import analytics
+from k4promo.services import analytics
 
 
 class AnalyticsTest(unittest.TestCase):

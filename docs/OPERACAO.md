@@ -1,14 +1,47 @@
 # Operação — K4binho Promo Bot
 
-Atualizado em **2026-09-01**.
+Atualizado em **2026-09-03**.
+
+## Tópicos e vitrine
+
+Cada oferta é publicada no tópico do fórum decidido por `services/router.py` (ver `TOPICOS.md`). Variáveis:
+
+```env
+TELEGRAM_TOPIC_MELHORES_DO_DIA=2194
+TELEGRAM_TOPIC_JOGOS=2195
+TELEGRAM_TOPIC_TECNOLOGIA=2197
+TELEGRAM_TOPIC_CASA_COZINHA=2198
+TELEGRAM_TOPIC_MODA_BELEZA=2201
+TELEGRAM_TOPIC_FERRAMENTAS_AUTO=2202
+TELEGRAM_TOPIC_ACHADINHOS=2205
+MELHORES_DO_DIA_MAX_PER_CYCLE=2
+MELHORES_DO_DIA_MAX_PER_DAY=8
+```
+
+`TELEGRAM_STEAM_THREAD_ID`, `TELEGRAM_GMG_THREAD_ID`, `TELEGRAM_ALIEXPRESS_THREAD_ID` e `TELEGRAM_NUUVEM_THREAD_ID` não são mais lidos. Um tópico com valor `0` cai em `TELEGRAM_THREAD_ID`.
+
+A vitrine grava `showcase_state.json` (não versionar). Para reiniciar a memória de cópias, apague o arquivo.
+
+## Shopee, KaBuM e Impact
+
+- Shopee precisa de `SHOPEE_APP_ID`/`SHOPEE_APP_SECRET` e `SHOPEE_SEARCHES`.
+- KaBuM precisa de `KABUM_AWIN_TOKEN`/`KABUM_PUBLISHER_ID`; sem link afiliado a oferta não sai.
+- GMG usa `IMPACT_ACCOUNT_SID`/`IMPACT_AUTH_TOKEN` (impact.com). `CJ_*` são aliases legados.
+- Qualquer um sem credencial é pulado em silêncio.
 
 ## Inicialização
 
 1. Mantenha `.env` somente no computador de operação.
-2. Instale dependências com `pip install -r requirements.txt`.
-3. Faça login do Mercado Livre com `python login_ml.py` quando a sessão expirar.
+2. Instale dependências com `pip install -r requirements.txt` (ou `pip install -e .` para desenvolvimento).
+3. Faça login do Mercado Livre com `python scripts/login_ml.py` quando a sessão expirar.
 4. Rode `python -m pytest -q` antes de colocar uma atualização importante em produção.
 5. Inicie pelo script operacional já usado no Windows (`reiniciar_bot.bat`/`run_bot.bat`) ou diretamente com Python.
+
+## Estrutura do código
+
+O bot virou o pacote `k4promo` em `src/`. `python bot.py` continua funcionando
+(o arquivo da raiz é um lançador), assim como `run_bot.bat` e `reiniciar_bot.bat`.
+Os arquivos de estado seguem na raiz do projeto. Detalhes em `ARQUITETURA.md`.
 
 ## Promotion Engine V1.1
 
@@ -92,10 +125,10 @@ Isso evita o comportamento antigo em que quase todo o catálogo tinha histórico
 A suíte automatizada atual possui:
 
 ```text
-114 passed
+195 passed
 ```
 
-Além da suíte anterior, há testes para fallback, sinais, cache positivo, revival e segurança do scanner interativo.
+Além da suíte anterior, há testes para fallback, sinais, cache positivo, revival, segurança do scanner interativo, classificação por tópico, roteamento, vitrine, Shopee, KaBuM e aliases de config.
 
 ## Segurança
 
@@ -105,10 +138,10 @@ Nunca envie ao GitHub ou compartilhe publicamente:
 - `ml_token.json`;
 - `ml_profile/`;
 - `bot.log` bruto;
-- tokens/chaves de API;
-- arquivos de estado operacional.
+- tokens/chaves de API (Telegram, Impact, Shopee, Awin, AliExpress, ITAD);
+- arquivos de estado operacional (`seen.json`, `showcase_state.json`, etc.).
 
-Use `export_project.py` para criar export sanitizado. Se uma credencial aparecer em log compartilhado, considere-a exposta e rotacione-a.
+Use `python scripts/export_project.py` para criar export sanitizado. Se uma credencial aparecer em log compartilhado, considere-a exposta e rotacione-a.
 
 ## Click tracking
 

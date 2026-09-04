@@ -1,10 +1,10 @@
 import unittest
 from datetime import UTC, datetime
 
-import promotion_engine
-import scoring
-import telegram
-from mercadolivre import Deal
+from k4promo.services import promotions as promotion_engine
+from k4promo.services import scoring
+from k4promo import telegram
+from k4promo.providers.mercadolivre.api import Deal
 
 
 class PromotionEngineTest(unittest.TestCase):

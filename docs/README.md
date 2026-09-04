@@ -21,18 +21,24 @@ fontes
 
 ## Fontes
 
-### Comerciais
+### Comerciais (com comissão)
 
 - Mercado Livre — prioridade comercial, links afiliados e descoberta de promoções.
+- Shopee — Open API GraphQL de afiliados (`providers/shopee.py`).
 - AliExpress — API afiliada e suporte a catálogo de campanhas/códigos.
+- KaBuM! — API pública de catálogo + link afiliado Awin (`providers/kabum.py`).
+- Green Man Gaming — via **impact.com** (`providers/gmg.py`; não é CJ Affiliate).
 
-### PLUS / editorial
+### Editoriais (PLUS)
 
 - Steam
 - Nuuvem
-- Green Man Gaming
 
-Essas fontes ajudam aquisição e retenção e não devem ser tratadas como equivalentes comerciais ao ML/Ali.
+Essas fontes ajudam aquisição e retenção e não devem ser tratadas como equivalentes comerciais.
+
+## Tópicos do Telegram
+
+As publicações são distribuídas em sete tópicos do fórum (Melhores do Dia, Jogos, Tecnologia, Casa & Cozinha, Moda & Beleza, Ferramentas & Auto, Achadinhos) segundo a prioridade de lojas definida em `domain/topics.py`. "Melhores do Dia" é uma vitrine sem coleta própria. Detalhes em `TOPICOS.md`.
 
 ## Promotion Engine V1.1
 
@@ -55,7 +61,7 @@ O histórico de preço continua usando o preço público listado para não conta
 A suíte automatizada atual possui:
 
 ```text
-114 passed
+195 passed
 ```
 
 O GitHub Actions executa validação de sintaxe e a suíte completa em pushes/PRs.
@@ -77,14 +83,22 @@ ML_PROMO_REVIVAL_MIN_DROP_AMOUNT=20
 
 ## Segurança
 
-Não publique tokens, segredos, perfil persistente do Chrome, logs brutos nem arquivos de estado. Use `export_project.py` para exportar o projeto de forma sanitizada.
+Não publique tokens, segredos, perfil persistente do Chrome, logs brutos nem arquivos de estado. Use `python scripts/export_project.py` para exportar o projeto de forma sanitizada.
 
 ## Próximo passo
 
-A V1.1 está implementada e testada, mas a interação com a interface real do Mercado Livre precisa de validação ao vivo. O próximo checkpoint é observar alguns ciclos e comparar `promo-scan`, fallback, revivals e selecionados com o funil anterior.
+A distribuição por tópicos, a vitrine e os ciclos Shopee/KaBuM estão implementados e cobertos por testes, mas precisam de validação ao vivo (respostas reais das APIs e acerto do classificador de título). A V1.1 do ML também segue aguardando observação de ciclos reais.
+
+## Código
+
+O bot é o pacote `k4promo`, em `src/`. O `bot.py` da raiz é só um lançador, para
+os atalhos do Windows seguirem funcionando. A organização por camadas está em
+`ARQUITETURA.md`.
 
 Consulte também:
 
+- `ARQUITETURA.md`
+- `TOPICOS.md`
 - `ROADMAP.md`
 - `ProximosPasso.md`
 - `OPERACAO.md`

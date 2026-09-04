@@ -2,7 +2,7 @@ import unittest
 from unittest import mock
 
 import httpx
-import steam
+from k4promo.providers import steam
 
 
 class SteamPackageParsingTest(unittest.TestCase):

@@ -1,6 +1,6 @@
 import unittest
 
-import telegram
+from k4promo import telegram
 
 
 class FormatDigestTest(unittest.TestCase):

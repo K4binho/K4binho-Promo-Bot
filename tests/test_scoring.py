@@ -1,7 +1,7 @@
 import unittest
 
-from mercadolivre import Deal
-import scoring
+from k4promo.providers.mercadolivre.api import Deal
+from k4promo.services import scoring
 
 
 def make_deal(price=100.0, original=200.0, sales=0, rating=None,

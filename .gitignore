@@ -12,8 +12,12 @@ alerts.json
 click_links.json
 clicks.jsonl
 .pytest_cache/
+build/
+dist/
+.venv/
 *.egg-info/
 digest_state.json
+showcase_state.json
 promotion_cache.json
 promotion_state.json
 promotions.json

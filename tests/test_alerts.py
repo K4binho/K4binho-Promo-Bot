@@ -2,7 +2,7 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from unittest import mock
 
-import alert_store
+from k4promo.storage import alert_store
 
 
 class AlertStoreTest(unittest.TestCase):

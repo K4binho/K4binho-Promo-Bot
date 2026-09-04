@@ -16,8 +16,8 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install dependencies
-        run: pip install -r requirements.txt pytest
+        run: pip install -e ".[dev]"
       - name: Syntax check
-        run: python -m py_compile bot.py config.py deal_store.py ml_playwright.py promotion_engine.py
+        run: python -m compileall -q src bot.py scripts
       - name: Tests
         run: python -m pytest -q

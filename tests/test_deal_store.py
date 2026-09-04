@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import deal_store as ds
+from k4promo.storage import deal_store as ds
 
 
 class DealStoreTest(unittest.TestCase):

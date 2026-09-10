@@ -2,8 +2,8 @@ import json
 import logging
 import unicodedata
 from datetime import UTC, datetime
-from pathlib import Path
 
+from k4promo.storage.atomic import atomic_write_json
 from k4promo.storage.paths import data_path
 
 STORE_PATH = data_path("alerts.json")
@@ -28,10 +28,7 @@ def load_alerts() -> dict[str, list[dict]]:
 
 
 def save_alerts(alerts: dict[str, list[dict]]) -> None:
-    STORE_PATH.write_text(
-        json.dumps(alerts, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    atomic_write_json(STORE_PATH, alerts, indent=2)
 
 
 def add_alert(

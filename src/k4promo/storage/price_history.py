@@ -1,7 +1,7 @@
 import json
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
+from k4promo.storage.atomic import atomic_write_json
 from k4promo.storage.paths import data_path
 
 STORE_PATH = data_path("price_history.json")
@@ -18,10 +18,7 @@ def load_history() -> dict[str, list[list[str | int]]]:
 
 
 def save_history(history: dict[str, list[list[str | int]]]) -> None:
-    STORE_PATH.write_text(
-        json.dumps(history, ensure_ascii=False, separators=(",", ":")),
-        encoding="utf-8",
-    )
+    atomic_write_json(STORE_PATH, history)
 
 
 def record(history: dict[str, list[list[str | int]]], item_id: str, price: float) -> None:

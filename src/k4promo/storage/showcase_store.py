@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
+from k4promo.storage.atomic import atomic_write_json
 from k4promo.storage.paths import data_path
 
 STATE_PATH = data_path("showcase_state.json")
@@ -29,12 +29,7 @@ def load_state() -> dict:
 
 
 def save_state(state: dict) -> None:
-    tmp = STATE_PATH.with_suffix(".tmp")
-    tmp.write_text(
-        json.dumps(state, ensure_ascii=False, separators=(",", ":")),
-        encoding="utf-8",
-    )
-    tmp.replace(STATE_PATH)
+    atomic_write_json(STATE_PATH, state)
 
 
 def prune(state: dict, now: datetime | None = None, days: int = MEMORY_DAYS) -> None:

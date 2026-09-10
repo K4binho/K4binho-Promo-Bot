@@ -1,16 +1,55 @@
 import logging
+import os
 import re
+from html import escape as _esc
 
 import httpx
 
-from k4promo.storage import alert_store
-from k4promo.services import analytics
 from k4promo import telegram
 from k4promo.domain import topics
+from k4promo.services import analytics
+from k4promo.storage import alert_store
+from k4promo.telegram.client import sanitize as _sanitize_log
 
 GETUPDATE_URL = "https://api.telegram.org/bot{token}/getUpdates"
 
 log = logging.getLogger("k4binho")
+
+
+def _max_alerts_per_chat() -> int:
+    raw = os.getenv("MAX_ALERTS_PER_CHAT", "10")
+    try:
+        return int(raw)
+    except ValueError:
+        return 10
+
+
+def dispatch_message(
+    token: str,
+    chat_id: str,
+    text: str,
+    alerts: dict[str, list[dict]],
+    admin_chat_id: str = "",
+) -> None:
+    """Roteia uma mensagem de comando pro handler certo.
+
+    Compartilhado entre ``poll_commands`` (compatibilidade) e o listener em
+    tempo real (``telegram/listener.py``), pra não duplicar a lógica de
+    comandos em dois lugares.
+    """
+    text = text.strip()
+    if text.startswith("/alerta "):
+        _handle_add_alert(token, chat_id, text[8:].strip(), alerts)
+    elif text == "/meusalertas":
+        _handle_list_alerts(token, chat_id, alerts)
+    elif text.startswith("/cancelar "):
+        _handle_cancel_alert(token, chat_id, text[10:].strip(), alerts)
+    elif text == "/status" and admin_chat_id and chat_id == admin_chat_id:
+        _handle_status(token, chat_id, alerts)
+    elif text == "/start":
+        _handle_start(token, chat_id)
+    # /buscar é tratado à parte pelo listener (precisa de estado de busca
+    # pendente e roda em background) — ver k4promo.commands.hunt.
 
 
 def poll_commands(
@@ -19,6 +58,10 @@ def poll_commands(
     last_update_id: int,
     admin_chat_id: str = "",
 ) -> int:
+    """Polling síncrono e pontual (timeout=0, sem long poll). Mantido por
+    compatibilidade com ``--once``/scripts antigos; o processo principal usa
+    o listener em tempo real (``telegram/listener.py``), que roda em thread
+    própria e não fica preso à cadência dos ciclos."""
     try:
         resp = httpx.get(
             GETUPDATE_URL.format(token=token),
@@ -27,7 +70,7 @@ def poll_commands(
         )
         resp.raise_for_status()
     except httpx.HTTPError as exc:
-        log.error("[Commands] polling: %s", exc)
+        log.error("[Commands] polling: %s", _sanitize_log(str(exc), token))
         return last_update_id
 
     updates = resp.json().get("result", [])
@@ -36,19 +79,9 @@ def poll_commands(
         msg = update.get("message")
         if not msg or not msg.get("text"):
             continue
-        text = msg["text"].strip()
-        chat_id = str(msg["chat"]["id"])
-
-        if text.startswith("/alerta "):
-            _handle_add_alert(token, chat_id, text[8:].strip(), alerts)
-        elif text == "/meusalertas":
-            _handle_list_alerts(token, chat_id, alerts)
-        elif text.startswith("/cancelar "):
-            _handle_cancel_alert(token, chat_id, text[10:].strip(), alerts)
-        elif text == "/status" and admin_chat_id and chat_id == admin_chat_id:
-            _handle_status(token, chat_id, alerts)
-        elif text == "/start":
-            _handle_start(token, chat_id)
+        dispatch_message(
+            token, str(msg["chat"]["id"]), msg["text"], alerts, admin_chat_id
+        )
 
     if updates:
         alert_store.save_alerts(alerts)
@@ -63,7 +96,8 @@ def _handle_start(token: str, chat_id: str) -> None:
         "<code>/alerta rtx 5070</code> — alerta por palavra-chave\n"
         "<code>/alerta ssd abaixo 500</code> — alerta com preço máximo\n"
         "<code>/meusalertas</code> — ver alertas ativos\n"
-        "<code>/cancelar 1</code> — cancelar alerta pelo número"
+        "<code>/cancelar 1</code> — cancelar alerta pelo número\n"
+        "<code>/buscar palworld</code> — buscar um jogo ou produto agora"
     )
     telegram.send_message(token, chat_id, text)
 
@@ -90,8 +124,12 @@ def _handle_add_alert(
         return
 
     user_alerts = alert_store.get_alerts(alerts, chat_id)
-    if len(user_alerts) >= 10:
-        telegram.send_message(token, chat_id, "Limite de 10 alertas atingido. Cancele algum com /cancelar.")
+    max_alerts = _max_alerts_per_chat()
+    if len(user_alerts) >= max_alerts:
+        telegram.send_message(
+            token, chat_id,
+            f"Limite de {max_alerts} alertas atingido. Cancele algum com /cancelar.",
+        )
         return
 
     alert_store.add_alert(alerts, chat_id, keywords, max_price=max_price)
@@ -99,7 +137,7 @@ def _handle_add_alert(
     price_info = f" abaixo de R$ {max_price:.2f}" if max_price else ""
     telegram.send_message(
         token, chat_id,
-        f"✅ Alerta criado: <b>{keywords}</b>{price_info}\n\nVocê será notificado quando encontrarmos.",
+        f"✅ Alerta criado: <b>{_esc(keywords)}</b>{price_info}\n\nVocê será notificado quando encontrarmos.",
     )
     log.info("[Alerta] chat=%s criou alerta: %s%s", chat_id, keywords, price_info)
 
@@ -114,7 +152,7 @@ def _handle_list_alerts(
 
     lines = ["🔔 <b>Seus alertas:</b>\n"]
     for i, a in enumerate(user_alerts, 1):
-        desc = a["keywords"]
+        desc = _esc(a["keywords"])
         if a.get("max_price"):
             desc += f" (abaixo de R$ {a['max_price']:.2f})"
         lines.append(f"{i}. {desc}")
@@ -195,12 +233,12 @@ def notify_alert_match(
     price_brl = f"R$ {price:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     text = (
         f"🔔 <b>ALERTA PERSONALIZADO</b>\n\n"
-        f"<b>{title}</b>\n\n"
+        f"<b>{_esc(title)}</b>\n\n"
         f"Encontrado por <b>{price_brl}</b>\n"
-        f"Palavra-chave: {alert['keywords']}\n\n"
-        f"<a href=\"{link}\">VER OFERTA</a>"
+        f"Palavra-chave: {_esc(alert['keywords'])}\n\n"
+        f"<a href=\"{_esc(link)}\">VER OFERTA</a>"
     )
     try:
         telegram.send_message(token, chat_id, text)
     except httpx.HTTPError as exc:
-        log.error("[Alerta] falha ao notificar chat=%s: %s", chat_id, exc)
+        log.error("[Alerta] falha ao notificar chat=%s: %s", chat_id, _sanitize_log(str(exc), token))

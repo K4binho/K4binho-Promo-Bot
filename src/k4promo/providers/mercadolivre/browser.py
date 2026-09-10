@@ -85,7 +85,7 @@ def discover_promotions(product_urls: list[str]) -> dict[str, list[promotion_eng
     if not USER_DATA_DIR.exists(): raise NotLoggedIn("Sem sessao. Rode: python login_ml.py")
     results={}
     with sync_playwright() as p:
-        ctx=_launch(p,headless=False); page=ctx.pages[0] if ctx.pages else ctx.new_page()
+        ctx=_launch(p,headless=True); page=ctx.pages[0] if ctx.pages else ctx.new_page()
         try:
             for i,url in enumerate(product_urls):
                 try:
@@ -107,7 +107,7 @@ def generate_links(
 
     results: dict[str, tuple[str | None, str | None]] = {}
     with sync_playwright() as p:
-        ctx = _launch(p, headless=False)
+        ctx = _launch(p, headless=True)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
 
         for i, url in enumerate(product_urls):

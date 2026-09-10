@@ -42,6 +42,13 @@ def _get_int(name: str, default: int) -> int:
     return int(raw.strip())
 
 
+def _get_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return float(raw.strip())
+
+
 def _get_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None or not raw.strip():
@@ -135,6 +142,23 @@ class Config:
     )
     poll_interval_seconds: int = field(default_factory=lambda: _get_int("POLL_INTERVAL_SECONDS", 1800))
     max_posts_per_cycle: int = field(default_factory=lambda: _get_int("MAX_POSTS_PER_CYCLE", 3))
+    source_max_concurrency: int = field(
+        default_factory=lambda: _get_int("SOURCE_MAX_CONCURRENCY", 5)
+    )
+    source_timeout_seconds: int = field(
+        default_factory=lambda: _get_int("SOURCE_TIMEOUT_SECONDS", 180)
+    )
+    database_url: str = field(default_factory=lambda: _get("DATABASE_URL"))
+
+    # Fase 4 — republicação (deal_store.should_republish), aplicada a todas
+    # as fontes exceto ML (que tem sua própria lógica mais fina).
+    repost_min_days: int = field(default_factory=lambda: _get_int("REPOST_MIN_DAYS", 0))
+    repost_min_drop_percent: int = field(
+        default_factory=lambda: _get_int("REPOST_MIN_DROP_PERCENT", 10)
+    )
+    repost_min_drop_amount: float = field(
+        default_factory=lambda: _get_float("REPOST_MIN_DROP_AMOUNT", 20.0)
+    )
     steam_min_discount_percent: int = field(
         default_factory=lambda: _get_int("STEAM_MIN_DISCOUNT_PERCENT", 20)
     )

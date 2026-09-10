@@ -1,8 +1,8 @@
 import hashlib
 import json
 import logging
-from pathlib import Path
 
+from k4promo.storage.atomic import atomic_write_json
 from k4promo.storage.paths import data_path
 
 STATE_PATH = data_path("digest_state.json")
@@ -21,10 +21,7 @@ def load_state() -> dict[str, str]:
 
 def save_state(state: dict[str, str]) -> None:
     """Persist digest state atomically so restarts don't resend today's digest."""
-    tmp = STATE_PATH.with_suffix(".tmp")
-    payload = json.dumps(state, ensure_ascii=False, separators=(",", ":"))
-    tmp.write_text(payload, encoding="utf-8")
-    tmp.replace(STATE_PATH)
+    atomic_write_json(STATE_PATH, state)
 
 
 def digest_hash(items: list[dict]) -> str:

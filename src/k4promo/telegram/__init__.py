@@ -5,7 +5,13 @@ do código escreva ``telegram.send_message(...)`` e ``telegram.format_deal(...)`
 sem precisar saber em qual arquivo cada função mora.
 """
 
-from k4promo.telegram.client import MESSAGE_URL, PHOTO_URL, send_message
+from k4promo.telegram.client import (
+    MESSAGE_URL,
+    PHOTO_URL,
+    answer_callback_query,
+    delete_message,
+    send_message,
+)
 from k4promo.telegram.formatters import (
     format_aliexpress_deal,
     format_campaign_notice,
@@ -24,6 +30,8 @@ __all__ = [
     "MESSAGE_URL",
     "PHOTO_URL",
     "send_message",
+    "delete_message",
+    "answer_callback_query",
     "format_aliexpress_deal",
     "format_campaign_notice",
     "format_deal",

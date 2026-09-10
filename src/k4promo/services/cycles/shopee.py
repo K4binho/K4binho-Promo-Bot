@@ -17,10 +17,12 @@ from k4promo.services import dedup, promotions as promotion_engine, scoring
 from k4promo.services.context import CycleContext
 from k4promo.services.publisher import Publisher
 from k4promo.services.router import resolve_topic
+from k4promo.storage import deal_store as ds
 
 log = logging.getLogger("k4binho")
 
 PAGE_LIMIT = 20
+REPUBLISH_SCORE_BONUS = 20
 
 
 def run(ctx: CycleContext) -> int:
@@ -43,18 +45,38 @@ def run(ctx: CycleContext) -> int:
                 seen_ids.add(offer.offer_id)
                 offers.append(offer)
 
+    offers = dedup.dedupe_by_title(offers)
+    offers = dedup.drop_relisted(
+        offers, ctx.published_deals, source_of=lambda _offer: "shopee",
+        seen=ctx.seen,
+    )
     dedup.release_stale(
         ctx.seen, "shopee:",
-        {o.key for o in offers if o.discount_percent > 0},
+        dedup.active_keys_for_titles(
+            offers, ctx.published_deals,
+            {o.key for o in offers if o.discount_percent > 0},
+            source_of=lambda _offer: "shopee",
+        ),
         log_tag="Shopee",
     )
+
+    # Fase 4: quem já foi visto mas caiu de preço, bateu piso histórico ou
+    # passou do período configurado volta a disputar uma vaga.
+    republish = dedup.reinject_republishable(
+        ctx, offers,
+        min_drop_percent=getattr(cfg, "repost_min_drop_percent", 10),
+        min_drop_amount=getattr(cfg, "repost_min_drop_amount", 20.0),
+        repost_min_days=getattr(cfg, "repost_min_days", 0),
+    )
+    republish_info = {o.key: (reason, prev) for o, reason, prev in republish}
 
     candidates = [
         o for o in offers
         if o.discount_percent >= cfg.shopee_min_discount_percent
         and o.sales_count >= getattr(cfg, "shopee_min_sales", 0)
-        and o.key not in ctx.seen
+        and ctx.republish_keys.get(o.key, o.key) not in ctx.seen
     ]
+    candidates.extend(o for o, _reason, _prev in republish)
     candidates = dedup.dedupe_by_title(candidates)
 
     catalog = promotion_engine.load_catalog(cfg.promotions_file)
@@ -71,12 +93,13 @@ def run(ctx: CycleContext) -> int:
             promotion_savings=promo_eval.guaranteed_savings,
             promotion_code=display_promo.code if display_promo and promo_eval.best_guaranteed else "",
         )
-        scored.append((r.total, offer, r, resolve_topic("shopee", offer.title), promo_eval))
+        total = r.total + (REPUBLISH_SCORE_BONUS if offer.key in republish_info else 0)
+        scored.append((total, offer, r, resolve_topic("shopee", offer.title), promo_eval))
     scored.sort(key=lambda x: x[0], reverse=True)
     selected = scored[: cfg.shopee_max_posts_per_cycle]
 
-    log.info("[Shopee] Encontrados: %d | Candidatos: %d | Selecionados: %d",
-             len(offers), len(scored), len(selected))
+    log.info("[Shopee] Encontrados: %d | Candidatos: %d | Republicaveis: %d | Selecionados: %d",
+             len(offers), len(scored), len(republish), len(selected))
 
     if ctx.dry_run:
         for total, o, _r, topic, _pe in scored:
@@ -90,16 +113,29 @@ def run(ctx: CycleContext) -> int:
     posted = 0
     for score_val, offer, result, topic, promo_eval in selected:
         link = publisher.affiliate_link(offer)
-        text = telegram.format_shopee_deal(
-            title=offer.title, price=offer.price, link=link,
-            original_price=offer.original_price, discount=offer.discount_percent,
-            sales_count=offer.sales_count, rating=offer.rating, promotion=promo_eval,
-        )
+        reason, prev_price = republish_info.get(offer.key, ("novo", None))
+        prev_entry = ctx.published_deals.get(offer.key) if reason != "novo" else None
+        previous_message = None
+        if prev_entry and prev_entry.get("message_id") is not None:
+            previous_message = (prev_entry.get("message_id"), prev_entry.get("thread_id"))
+
+        if prev_price is not None:
+            text = telegram.format_price_drop(
+                title=offer.title, price=promo_eval.scoring_price, previous_price=prev_price,
+                link=link, promotion=promo_eval,
+            )
+        else:
+            text = telegram.format_shopee_deal(
+                title=offer.title, price=offer.price, link=link,
+                original_price=offer.original_price, discount=offer.discount_percent,
+                sales_count=offer.sales_count, rating=offer.rating, promotion=promo_eval,
+            )
         display_promo = promo_eval.display_promotion
         ok = publisher.publish(
             offer, topic=topic, text=text, result=result, score=score_val,
             link=link, log_tag="Shopee", price=promo_eval.scoring_price,
             alert_link=offer.permalink,
+            previous_message=previous_message,
             analytics_kwargs={
                 "listed_price": offer.price,
                 "category": scoring.category_match(offer.title),
@@ -107,14 +143,22 @@ def run(ctx: CycleContext) -> int:
                 "promotion_code": display_promo.code if display_promo else "",
                 "promotion_savings": promo_eval.guaranteed_savings,
                 "promotion_conditional": bool(display_promo and display_promo.conditional),
+                "action": reason,
             },
             showcase_kwargs={"coupon_savings": promo_eval.guaranteed_savings},
         )
         if not ok:
             continue
+        ds.record_published(
+            ctx.published_deals, ctx.republish_keys.get(offer.key, offer.key), promo_eval.scoring_price,
+            promotion_signature=display_promo.code if display_promo else "",
+            title=offer.title, url=link,
+            message_id=publisher.last_message_id, thread_id=publisher.last_thread_id,
+            reason=reason,
+        )
         posted += 1
-        log.info("[Shopee] postado: %d%% off | %s | %s",
-                 offer.discount_percent, topic, offer.title[:50])
+        log.info("[Shopee] postado (%s): %d%% off | %s | %s",
+                 reason, offer.discount_percent, topic, offer.title[:50])
         publisher.pace(posted, len(selected))
 
     return posted

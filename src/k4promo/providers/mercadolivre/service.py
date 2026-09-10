@@ -29,7 +29,7 @@ from k4promo.providers.mercadolivre import browser as ml_playwright
 from k4promo.providers.mercadolivre import promotions as ml_promotions
 from k4promo.providers.mercadolivre import scraper as ml_scraper
 from k4promo.providers.mercadolivre import signals as ml_signals
-from k4promo.services import promotions as promotion_engine
+from k4promo.services import dedup, promotions as promotion_engine
 from k4promo.services import scoring
 from k4promo.services.context import CycleContext
 from k4promo.services.publisher import Publisher
@@ -97,6 +97,20 @@ def _collect_offers(cfg) -> list[Offer]:
     return [from_mercadolivre(d) for d in deals]
 
 
+def _canonical_item_id(ctx: CycleContext, offer: Offer) -> str:
+    """Usa chave histórica quando anúncio volta com ID novo."""
+    key = offer.key
+    title = ds.normalize_title(offer.title)
+    previous = (
+        ds.find_by_normalized_title(ctx.published_deals, "ml", title)
+        if title else None
+    )
+    if previous is not None and previous[0] != key:
+        ctx.republish_keys[key] = previous[0]
+        return previous[0]
+    return key
+
+
 def _warn_session_expired(cfg) -> None:
     global _session_alert_sent
     if _session_alert_sent:
@@ -120,6 +134,7 @@ def run(ctx: CycleContext) -> int:
     if not offers:
         log.info("[ML] Nenhuma oferta encontrada (scraper e API vazios).")
         return 0
+    offers = dedup.dedupe_by_title(offers)
 
     best_sellers = ml_signals.best_seller_ids(
         cfg.ml_highlight_category_ids, cfg.ml_client_id, cfg.ml_client_secret
@@ -141,9 +156,10 @@ def run(ctx: CycleContext) -> int:
 
     for offer in offers:
         item_id = offer.offer_id
-        observations = price_history.observation_count(ctx.history, item_id, cfg.price_history_days)
-        historical_min = price_history.min_price(ctx.history, item_id, cfg.price_history_days)
-        historical_avg = price_history.avg_price(ctx.history, item_id, cfg.price_history_days)
+        state_key = _canonical_item_id(ctx, offer)
+        observations = price_history.observation_count(ctx.history, state_key, cfg.price_history_days)
+        historical_min = price_history.min_price(ctx.history, state_key, cfg.price_history_days)
+        historical_avg = price_history.avg_price(ctx.history, state_key, cfg.price_history_days)
 
         promo_eval = promotion_engine.evaluate_price(
             offer.price, promotion_map.get(item_id, []), title=offer.title
@@ -167,7 +183,7 @@ def run(ctx: CycleContext) -> int:
         )
         # O histórico continua usando o preço público listado: cupom temporário
         # não contamina a série base.
-        price_history.record(ctx.history, item_id, offer.price)
+        price_history.record(ctx.history, state_key, offer.price)
 
         has_price_evidence = result.price_subtotal >= cfg.price_min
         history_ready = observations + 1 >= cfg.min_history_observations
@@ -186,7 +202,7 @@ def run(ctx: CycleContext) -> int:
             stats["launch_ok"] += 1
         if points >= 2:
             stats["strong_signal"] += 1
-        already_seen = offer.key in seen
+        already_seen = state_key in seen
         if already_seen:
             stats["already_seen"] += 1
 
@@ -223,13 +239,13 @@ def run(ctx: CycleContext) -> int:
             current_effective = promo_eval.scoring_price
             signature = promotion_engine.promotion_fingerprint(promo_eval.best_guaranteed)
             is_revival, prev_price = ds.check_promotion_revival(
-                ctx.published_deals, item_id, current_effective, signature,
+                ctx.published_deals, state_key, current_effective, signature,
                 min_drop_percent=cfg.ml_promo_revival_min_drop_percent,
                 min_drop_amount=cfg.ml_promo_revival_min_drop_amount,
                 cooldown_hours=cfg.ml_promo_revival_cooldown_hours,
             )
             if is_revival:
-                revival_ids.add(item_id)
+                revival_ids.add(state_key)
                 stats["promotion_revival"] += 1
                 log.info("[ML][promo-revival] %s | %.2f -> %.2f",
                          offer.title[:45], prev_price, current_effective)
@@ -237,7 +253,7 @@ def run(ctx: CycleContext) -> int:
                                    historical_avg, prev_price, promo_eval))
             else:
                 is_drop, prev_price = ds.check_price_drop(
-                    ctx.published_deals, item_id, current_effective
+                    ctx.published_deals, state_key, current_effective
                 )
                 if is_drop:
                     log.info("[ML][price-drop] %s caiu de %.2f para %.2f",
@@ -301,13 +317,20 @@ def run(ctx: CycleContext) -> int:
         # O link de afiliado traz a imagem do anúncio; o thumbnail do scraper é
         # o fallback.
         offer.image_url = image or offer.image_url
+        canonical_key = _canonical_item_id(ctx, offer)
+        previous_entry = ctx.published_deals.get(canonical_key, {})
+        previous_message = None
+        if previous_entry.get("message_id") is not None:
+            previous_message = (
+                previous_entry["message_id"], previous_entry.get("thread_id")
+            )
 
         if drop_prev is not None:
             text = telegram.format_price_drop(
                 title=offer.title, price=effective_price, previous_price=drop_prev,
                 link=link, promotion=promo_eval,
             )
-            action = "promotion_revival" if offer.offer_id in revival_ids else "price_drop"
+            action = "promotion_revival" if canonical_key in revival_ids else "price_drop"
         else:
             text = telegram.format_deal(
                 title=offer.title, price=offer.price, original_price=offer.original_price,
@@ -326,14 +349,16 @@ def run(ctx: CycleContext) -> int:
         ok = publisher.publish(
             offer, topic=topic, text=text, result=result, score=score_val,
             link=link, log_tag="ML", price=effective_price,
-            showcase_key=f"ml:{offer.offer_id}",
+            seen_key=canonical_key,
+            showcase_key=f"ml:{canonical_key}",
+            previous_message=previous_message,
             analytics_kwargs={
                 "listed_price": offer.price,
                 "discount_percent": effective_discount,
                 "price_subtotal": result.price_subtotal,
                 "reasons": result.reasons,
                 "history_observations": price_history.observation_count(
-                    ctx.history, offer.offer_id, cfg.price_history_days
+                    ctx.history, canonical_key, cfg.price_history_days
                 ),
                 "min_price_30d": hist_min,
                 "avg_price_30d": hist_avg,
@@ -356,8 +381,11 @@ def run(ctx: CycleContext) -> int:
             continue
 
         ds.record_published(
-            ctx.published_deals, offer.offer_id, effective_price,
+            ctx.published_deals, canonical_key, effective_price,
             promotion_signature=promotion_engine.promotion_fingerprint(promo_eval.best_guaranteed),
+            title=offer.title, url=link,
+            message_id=publisher.last_message_id, thread_id=publisher.last_thread_id,
+            reason=action,
         )
         posted += 1
         if promo_eval.guaranteed_savings > 0:

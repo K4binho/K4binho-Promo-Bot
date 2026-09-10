@@ -3,8 +3,8 @@
 import json
 import logging
 from datetime import UTC, datetime
-from pathlib import Path
 
+from k4promo.storage.atomic import atomic_write_json
 from k4promo.storage.paths import data_path
 
 LINKS_PATH = data_path("click_links.json")
@@ -24,10 +24,7 @@ def load_links() -> dict[str, dict]:
 
 
 def save_links(links: dict[str, dict]) -> None:
-    LINKS_PATH.write_text(
-        json.dumps(links, ensure_ascii=False, separators=(",", ":")),
-        encoding="utf-8",
-    )
+    atomic_write_json(LINKS_PATH, links)
 
 
 def register_link(

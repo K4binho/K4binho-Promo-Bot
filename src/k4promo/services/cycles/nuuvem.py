@@ -14,10 +14,12 @@ from k4promo.services import dedup, scoring
 from k4promo.services.context import CycleContext
 from k4promo.services.publisher import Publisher
 from k4promo.services.router import topic_thread_id
+from k4promo.storage import deal_store as ds
 
 log = logging.getLogger("k4binho")
 
 ENRICH_LIMIT = 60
+REPUBLISH_SCORE_BONUS = 20
 
 
 def run(ctx: CycleContext) -> int:
@@ -30,17 +32,42 @@ def run(ctx: CycleContext) -> int:
         log.error("[Nuuvem] %s", exc)
         return 0
 
+    deals = dedup.dedupe_by_title(
+        deals, key_of=lambda d: f"nuuvem:{d.game_id}"
+    )
+    deals = dedup.drop_relisted(
+        deals, ctx.published_deals,
+        key_of=lambda d: f"nuuvem:{d.game_id}",
+        source_of=lambda _deal: "nuuvem",
+        seen=ctx.seen,
+    )
     dedup.release_stale(
         ctx.seen, "nuuvem:",
-        {f"nuuvem:{d.game_id}" for d in deals if d.discount_percent > 0},
+        dedup.active_keys_for_titles(
+            deals, ctx.published_deals,
+            {f"nuuvem:{d.game_id}" for d in deals if d.discount_percent > 0},
+            source_of=lambda _deal: "nuuvem",
+        ),
         log_tag="Nuuvem", noun="jogo",
     )
+
+    republish_deals = dedup.reinject_republishable(
+        ctx, deals,
+        key_of=lambda d: f"nuuvem:{d.game_id}",
+        source_of=lambda _deal: "nuuvem",
+        price_of=lambda d: d.price,
+        min_drop_percent=getattr(cfg, "repost_min_drop_percent", 10),
+        min_drop_amount=getattr(cfg, "repost_min_drop_amount", 20.0),
+        repost_min_days=getattr(cfg, "repost_min_days", 0),
+    )
+    republish_info = {f"nuuvem:{d.game_id}": (reason, prev) for d, reason, prev in republish_deals}
 
     candidates = [
         d for d in deals
         if d.discount_percent >= cfg.nuuvem_min_discount_percent
-        and f"nuuvem:{d.game_id}" not in ctx.seen
+        and ctx.republish_keys.get(f"nuuvem:{d.game_id}", f"nuuvem:{d.game_id}") not in ctx.seen
     ]
+    candidates.extend(d for d, _reason, _prev in republish_deals)
     candidates.sort(key=lambda d: d.discount_percent, reverse=True)
     to_enrich = candidates[:ENRICH_LIMIT]
     # O enriquecimento altera o objeto do provider no lugar; normalizar depois.
@@ -56,30 +83,35 @@ def run(ctx: CycleContext) -> int:
             lowest_price=offer.lowest_price, waitlisted=offer.waitlisted,
         )
         all_scored.append((r.total, offer, r))
-        ctx.plus_candidates.append({
-            "score": r.total, "source": "nuuvem", "seen_key": offer.key,
-            "title": offer.title, "price": offer.price, "original_price": offer.original_price,
-            "discount_percent": offer.discount_percent, "link": offer.permalink,
-            "lowest_price": offer.lowest_price, "image_url": offer.image_url,
-            "game_id": offer.offer_id, "result": r, "thread_id": topic_thread_id(cfg, JOGOS),
-            "coupon_code": offer.promo_code or None,
-            "coupon_discount": offer.promo_description or None,
-            "review_score": offer.review_score,
-        })
+        if offer.key not in republish_info:
+            ctx.plus_candidates.append({
+                "score": r.total, "source": "nuuvem", "seen_key": offer.key,
+                "title": offer.title, "price": offer.price, "original_price": offer.original_price,
+                "discount_percent": offer.discount_percent, "link": offer.permalink,
+                "lowest_price": offer.lowest_price, "image_url": offer.image_url,
+                "game_id": offer.offer_id, "result": r, "thread_id": topic_thread_id(cfg, JOGOS),
+                "coupon_code": offer.promo_code or None,
+                "coupon_discount": offer.promo_description or None,
+                "review_score": offer.review_score,
+            })
 
     eligible_ids = {o.offer_id for o in offers if nuuvem.is_most_wanted(o, cfg.nuuvem_min_waitlisted)}
-    scored = [(total, o, r) for total, o, r in all_scored if o.offer_id in eligible_ids]
+    eligible_ids |= {o.offer_id for o in offers if o.key in republish_info}
+    scored = [
+        (total + (REPUBLISH_SCORE_BONUS if o.key in republish_info else 0), o, r)
+        for total, o, r in all_scored if o.offer_id in eligible_ids
+    ]
     scored.sort(key=lambda x: x[0], reverse=True)
     selected = scored[: cfg.nuuvem_max_posts_per_cycle]
 
     log.info(
         "[Nuuvem] Encontrados: %d | Desconto>=%d%%: %d | Nao vistos: %d | "
-        "Waitlisted>=%d: %d | Scored: %d | Selecionados: %d",
+        "Waitlisted>=%d: %d | Republicaveis: %d | Scored: %d | Selecionados: %d",
         len(deals), cfg.nuuvem_min_discount_percent,
         len([d for d in deals if d.discount_percent >= cfg.nuuvem_min_discount_percent]),
         len([d for d in deals if d.discount_percent >= cfg.nuuvem_min_discount_percent
              and f"nuuvem:{d.game_id}" not in ctx.seen]),
-        cfg.nuuvem_min_waitlisted, len(eligible_ids), len(scored), len(selected),
+        cfg.nuuvem_min_waitlisted, len(eligible_ids), len(republish_deals), len(scored), len(selected),
     )
 
     if ctx.dry_run:
@@ -94,21 +126,43 @@ def run(ctx: CycleContext) -> int:
     posted = 0
     for score_val, offer, result in selected:
         link = publisher.affiliate_link(offer)
-        text = telegram.format_nuuvem_deal(
-            title=offer.title, price=offer.price, original_price=offer.original_price,
-            discount=offer.discount_percent, link=link, lowest_price=offer.lowest_price,
-            coupon_code=offer.promo_code or None,
-            coupon_discount=offer.promo_description or None,
-        )
+        reason, prev_price = republish_info.get(offer.key, ("novo", None))
+        prev_entry = ctx.published_deals.get(offer.key) if reason != "novo" else None
+        previous_message = None
+        if prev_entry and prev_entry.get("message_id") is not None:
+            previous_message = (prev_entry.get("message_id"), prev_entry.get("thread_id"))
+
+        if prev_price is not None:
+            text = telegram.format_price_drop(
+                title=offer.title, price=offer.price, previous_price=prev_price, link=link,
+            )
+        else:
+            text = telegram.format_nuuvem_deal(
+                title=offer.title, price=offer.price, original_price=offer.original_price,
+                discount=offer.discount_percent, link=link, lowest_price=offer.lowest_price,
+                coupon_code=offer.promo_code or None,
+                coupon_discount=offer.promo_description or None,
+            )
         ok = publisher.publish(
             offer, topic=JOGOS, text=text, result=result, score=score_val,
             link=link, log_tag="Nuuvem", alert_link=offer.permalink,
-            analytics_kwargs={"category": "games", "deal_type": "plus", "affiliate": False},
+            previous_message=previous_message,
+            analytics_kwargs={
+                "category": "games", "deal_type": "plus", "affiliate": False,
+                "action": reason,
+            },
         )
         if not ok:
             continue
+        ds.record_published(
+            ctx.published_deals, ctx.republish_keys.get(offer.key, offer.key), offer.price,
+            promotion_signature=offer.promo_code or "",
+            title=offer.title, url=link,
+            message_id=publisher.last_message_id, thread_id=publisher.last_thread_id,
+            reason=reason,
+        )
         posted += 1
-        log.info("[Nuuvem] postado: %d%% off | %s", offer.discount_percent, offer.title[:50])
+        log.info("[Nuuvem] postado (%s): %d%% off | %s", reason, offer.discount_percent, offer.title[:50])
         publisher.pace(posted, len(selected))
 
     return posted

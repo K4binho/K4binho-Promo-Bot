@@ -1,9 +1,9 @@
-import time
-from pathlib import Path
 import json
+import time
 
 import httpx
 
+from k4promo.storage.atomic import atomic_write_json
 from k4promo.storage.paths import data_path
 
 TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
@@ -21,7 +21,7 @@ def _load_token() -> dict:
 
 def _save_token(data: dict) -> None:
     data["obtained_at"] = int(time.time())
-    TOKEN_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_json(TOKEN_PATH, data, indent=2)
 
 
 def exchange_code(client_id: str, client_secret: str, code: str, redirect_uri: str) -> dict:

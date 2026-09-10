@@ -19,9 +19,12 @@ from pathlib import Path
 
 
 def data_dir() -> Path:
-    """Diretório onde o estado é lido e gravado."""
+    """Diretório onde o estado é lido e gravado. Criado automaticamente se
+    ainda não existir (Fase 5, seção 19)."""
     override = os.getenv("K4PROMO_DATA_DIR", "").strip()
-    return Path(override).expanduser() if override else Path.cwd()
+    d = Path(override).expanduser() if override else Path.cwd()
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def data_path(name: str) -> Path:

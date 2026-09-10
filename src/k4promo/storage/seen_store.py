@@ -1,7 +1,7 @@
 import json
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
+from k4promo.storage.atomic import atomic_write_json
 from k4promo.storage.paths import data_path
 
 STORE_PATH = data_path("seen.json")
@@ -25,10 +25,7 @@ def load_seen() -> dict[str, str]:
 
 
 def save_seen(seen: dict[str, str]) -> None:
-    STORE_PATH.write_text(
-        json.dumps(seen, ensure_ascii=False, separators=(",", ":")),
-        encoding="utf-8",
-    )
+    atomic_write_json(STORE_PATH, seen)
 
 
 def mark_seen(seen: dict[str, str], item_id: str) -> None:

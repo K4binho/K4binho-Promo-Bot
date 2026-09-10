@@ -14,10 +14,12 @@ from k4promo.services import dedup, scoring
 from k4promo.services.context import CycleContext
 from k4promo.services.publisher import Publisher
 from k4promo.services.router import topic_thread_id
+from k4promo.storage import deal_store as ds
 
 log = logging.getLogger("k4binho")
 
 ENRICH_LIMIT = 60
+REPUBLISH_SCORE_BONUS = 20
 
 
 def run(ctx: CycleContext) -> int:
@@ -28,17 +30,42 @@ def run(ctx: CycleContext) -> int:
         log.error("[Steam] %s", exc)
         return 0
 
+    games = dedup.dedupe_by_title(
+        games, key_of=lambda g: f"steam:{g.game_id}"
+    )
+    games = dedup.drop_relisted(
+        games, ctx.published_deals,
+        key_of=lambda g: f"steam:{g.game_id}",
+        source_of=lambda _game: "steam",
+        seen=ctx.seen,
+    )
     dedup.release_stale(
         ctx.seen, "steam:",
-        {f"steam:{g.game_id}" for g in games if g.discount_percent > 0},
+        dedup.active_keys_for_titles(
+            games, ctx.published_deals,
+            {f"steam:{g.game_id}" for g in games if g.discount_percent > 0},
+            source_of=lambda _game: "steam",
+        ),
         log_tag="Steam", noun="jogo",
     )
+
+    republish_games = dedup.reinject_republishable(
+        ctx, games,
+        key_of=lambda g: f"steam:{g.game_id}",
+        source_of=lambda _game: "steam",
+        price_of=lambda g: g.price,
+        min_drop_percent=getattr(cfg, "repost_min_drop_percent", 10),
+        min_drop_amount=getattr(cfg, "repost_min_drop_amount", 20.0),
+        repost_min_days=getattr(cfg, "repost_min_days", 0),
+    )
+    republish_info = {f"steam:{g.game_id}": (reason, prev) for g, reason, prev in republish_games}
 
     candidates = [
         g for g in games
         if g.discount_percent >= cfg.steam_min_discount_percent
-        and f"steam:{g.game_id}" not in ctx.seen
+        and ctx.republish_keys.get(f"steam:{g.game_id}", f"steam:{g.game_id}") not in ctx.seen
     ]
+    candidates.extend(g for g, _reason, _prev in republish_games)
     candidates.sort(key=lambda g: g.discount_percent, reverse=True)
     to_enrich = candidates[:ENRICH_LIMIT]
     # O enriquecimento (ITAD) altera o objeto do provider no lugar, então só
@@ -60,14 +87,15 @@ def run(ctx: CycleContext) -> int:
             lowest_price=offer.lowest_price, waitlisted=offer.waitlisted,
         )
         all_scored.append((r.total, offer, r))
-        ctx.plus_candidates.append({
-            "score": r.total, "source": "steam", "seen_key": offer.key,
-            "title": offer.title, "price": offer.price, "original_price": offer.original_price,
-            "discount_percent": offer.discount_percent, "link": offer.permalink,
-            "lowest_price": offer.lowest_price, "image_url": offer.image_url,
-            "game_id": offer.offer_id, "result": r, "thread_id": topic_thread_id(cfg, JOGOS),
-            "review_score": offer.review_score,
-        })
+        if offer.key not in republish_info:
+            ctx.plus_candidates.append({
+                "score": r.total, "source": "steam", "seen_key": offer.key,
+                "title": offer.title, "price": offer.price, "original_price": offer.original_price,
+                "discount_percent": offer.discount_percent, "link": offer.permalink,
+                "lowest_price": offer.lowest_price, "image_url": offer.image_url,
+                "game_id": offer.offer_id, "result": r, "thread_id": topic_thread_id(cfg, JOGOS),
+                "review_score": offer.review_score,
+            })
 
     # Apps usam o portão normal de review/popularidade. Bundles/packages
     # geralmente não têm review próprio, então uma oferta non-app forte passa
@@ -85,8 +113,12 @@ def run(ctx: CycleContext) -> int:
         and o.discount_percent >= cfg.steam_min_discount_percent
         and total >= getattr(cfg, "plus_editorial_min_score", 25)
     }
-    eligible_ids = normal_app_ids | strong_nonapp_ids
-    scored = [(total, o, r) for total, o, r in all_scored if o.offer_id in eligible_ids]
+    republish_ids = {o.offer_id for o in offers if o.key in republish_info}
+    eligible_ids = normal_app_ids | strong_nonapp_ids | republish_ids
+    scored = [
+        (total + (REPUBLISH_SCORE_BONUS if o.key in republish_info else 0), o, r)
+        for total, o, r in all_scored if o.offer_id in eligible_ids
+    ]
     scored.sort(key=lambda x: x[0], reverse=True)
     selected = scored[: cfg.steam_max_posts_per_cycle]
 
@@ -94,7 +126,7 @@ def run(ctx: CycleContext) -> int:
         "[Steam] Encontrados: %d (apps=%d, packages=%d, bundles=%d) | "
         "Desconto>=%d%%: %d | Nao vistos: %d | Reviews OK: %d | "
         "Waitlist OK: %d | Bundle/package sem review: %d | Non-app editorial OK: %d | "
-        "Scored: %d | Selecionados: %d",
+        "Republicaveis: %d | Scored: %d | Selecionados: %d",
         len(games),
         sum(1 for g in games if g.store_type == "app"),
         sum(1 for g in games if g.store_type == "sub"),
@@ -109,7 +141,7 @@ def run(ctx: CycleContext) -> int:
             if steam.is_quality_game(o, cfg.steam_min_review_score, cfg.steam_min_review_count)
             and (o.waitlisted is None or o.waitlisted >= cfg.steam_min_waitlisted)),
         sum(1 for o in offers if o.store_type != "app" and o.review_count is None),
-        len(strong_nonapp_ids), len(scored), len(selected),
+        len(strong_nonapp_ids), len(republish_games), len(scored), len(selected),
     )
 
     if ctx.dry_run:
@@ -125,19 +157,40 @@ def run(ctx: CycleContext) -> int:
     posted = 0
     for score_val, offer, result in selected:
         link = publisher.affiliate_link(offer)
-        text = telegram.format_game_deal(
-            title=offer.title, price=offer.price, original_price=offer.original_price,
-            discount=offer.discount_percent, link=link, lowest_price=offer.lowest_price,
-        )
+        reason, prev_price = republish_info.get(offer.key, ("novo", None))
+        prev_entry = ctx.published_deals.get(offer.key) if reason != "novo" else None
+        previous_message = None
+        if prev_entry and prev_entry.get("message_id") is not None:
+            previous_message = (prev_entry.get("message_id"), prev_entry.get("thread_id"))
+
+        if prev_price is not None:
+            text = telegram.format_price_drop(
+                title=offer.title, price=offer.price, previous_price=prev_price, link=link,
+            )
+        else:
+            text = telegram.format_game_deal(
+                title=offer.title, price=offer.price, original_price=offer.original_price,
+                discount=offer.discount_percent, link=link, lowest_price=offer.lowest_price,
+            )
         ok = publisher.publish(
             offer, topic=JOGOS, text=text, result=result, score=score_val,
             link=link, log_tag="Steam", alert_link=offer.permalink,
-            analytics_kwargs={"category": "games", "deal_type": "plus", "affiliate": False},
+            previous_message=previous_message,
+            analytics_kwargs={
+                "category": "games", "deal_type": "plus", "affiliate": False,
+                "action": reason,
+            },
         )
         if not ok:
             continue
+        ds.record_published(
+            ctx.published_deals, ctx.republish_keys.get(offer.key, offer.key), offer.price,
+            title=offer.title, url=link,
+            message_id=publisher.last_message_id, thread_id=publisher.last_thread_id,
+            reason=reason,
+        )
         posted += 1
-        log.info("[Steam] postado: %d%% off | %s", offer.discount_percent, offer.title[:50])
+        log.info("[Steam] postado (%s): %d%% off | %s", reason, offer.discount_percent, offer.title[:50])
         publisher.pace(posted, len(selected))
 
     return posted

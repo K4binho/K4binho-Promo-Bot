@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
+from k4promo.storage.atomic import atomic_write_json
 from k4promo.storage.paths import data_path
 
 CACHE_PATH = data_path("promotion_cache.json")
@@ -347,12 +348,10 @@ def load_cache() -> dict:
 
 
 def save_cache(cache: dict) -> None:
-    tmp = CACHE_PATH.with_suffix(".tmp")
     try:
-        tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(CACHE_PATH)
+        atomic_write_json(CACHE_PATH, cache, indent=2)
     except OSError:
-        tmp.unlink(missing_ok=True)
+        pass
 
 
 def get_cached_promotions(cache: dict, key: str, max_age_hours: int, promotion_max_age_hours: int | None = None) -> list[Promotion] | None:
@@ -393,12 +392,10 @@ def load_state() -> dict:
 
 
 def save_state(state: dict) -> None:
-    tmp = STATE_PATH.with_suffix(".tmp")
     try:
-        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(STATE_PATH)
+        atomic_write_json(STATE_PATH, state, indent=2)
     except OSError:
-        tmp.unlink(missing_ok=True)
+        pass
 
 
 def due_campaigns(catalog: dict, state: dict, now: datetime | None = None) -> list[dict]:
